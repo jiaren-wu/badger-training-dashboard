@@ -40,6 +40,9 @@ jobs:
           STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
           STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
           STRAVA_REFRESH_TOKEN_JIAREN: ${{ secrets.STRAVA_REFRESH_TOKEN_JIAREN }}
+          GARMIN_TOKENS_BASE64: ${{ secrets.GARMIN_TOKENS_BASE64 }}
+          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
+          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
           FINALSURGE_EMAIL_RUBY: ${{ secrets.FINALSURGE_EMAIL_RUBY }}
           FINALSURGE_PASSWORD_RUBY: ${{ secrets.FINALSURGE_PASSWORD_RUBY }}
         run: python build_dashboard.py

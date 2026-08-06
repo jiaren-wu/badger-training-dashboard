@@ -17,6 +17,7 @@ a tiny JSON file the badge fetches over HTTP:
 
 Data sources per person (set in config.json):
   - "strava":     ACTUAL from Strava activities; PLANNED from "weekly_goal".
+  - "garmin":     ACTUAL from Garmin Connect activities; PLANNED from "weekly_goal".
   - "finalsurge": PLANNED + ACTUAL from the Final Surge training plan.
   - "manual":     PLANNED from "weekly_goal"; ACTUAL from "manual_actual" (0 default).
 
@@ -111,6 +112,50 @@ def strava_week_meters(refresh_token, monday, run_only=True):
         if len(batch) < 100:
             break
         page += 1
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Garmin Connect  (unofficial, via the `garminconnect` library — no partner
+# approval needed; logs in with your normal Garmin account).
+#
+# Auth options (checked in order):
+#   1. GARMIN_TOKENS_BASE64  - a base64 token blob from garmin_setup.py. Best for
+#      CI: no password or MFA prompt on each run. Tokens refresh themselves and
+#      last ~1 year.
+#   2. GARMIN_EMAIL + GARMIN_PASSWORD - a fresh login (may trigger MFA, which is
+#      awkward in CI). Fine for local runs.
+# ---------------------------------------------------------------------------
+def garmin_login():
+    from garminconnect import Garmin  # imported lazily so other sources don't need it
+    tokens = os.environ.get("GARMIN_TOKENS_BASE64")
+    if tokens:
+        g = Garmin()
+        g.login(tokenstore=tokens)  # >512 chars -> loaded as a base64 token blob
+        return g
+    email = env("GARMIN_EMAIL")
+    password = env("GARMIN_PASSWORD")
+    g = Garmin(email, password)
+    g.login()
+    return g
+
+
+def _is_run(activity):
+    at = activity.get("activityType") or {}
+    key = (at.get("typeKey") or "").lower()
+    return "run" in key  # running, trail_running, treadmill_running, virtual_run...
+
+
+def garmin_week_meters(monday, sunday, run_only=True):
+    g = garmin_login()
+    start_date = monday.date().isoformat()
+    end_date = sunday.date().isoformat()
+    activities = g.get_activities_by_date(start_date, end_date) or []
+    total = 0.0
+    for a in activities:
+        if run_only and not _is_run(a):
+            continue
+        total += float(a.get("distance", 0) or 0)  # meters
     return total
 
 
@@ -234,6 +279,10 @@ def resolve_person(p, units, monday, sunday, debug_name=None):
         rt = env(p["strava_refresh_token_env"])
         actual = to_units(strava_week_meters(rt, monday), units)
         planned = goal  # Strava has no training plan
+
+    elif source == "garmin":
+        actual = to_units(garmin_week_meters(monday, sunday), units)
+        planned = goal  # Garmin Connect has no simple weekly plan total
 
     elif source == "finalsurge":
         email = env(p["finalsurge_email_env"])

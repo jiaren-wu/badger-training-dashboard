@@ -12,9 +12,8 @@
     },
     {
       "name": "Jiaren",
-      "source": "strava",
-      "weekly_goal": 42,
-      "strava_refresh_token_env": "STRAVA_REFRESH_TOKEN_JIAREN"
+      "source": "garmin",
+      "weekly_goal": 42
     }
   ]
 }

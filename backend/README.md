@@ -7,10 +7,10 @@ rain / air-quality outlook come straight from the badge itself (Open-Meteo, no
 key), so the backend is only responsible for the running numbers.
 
 ```
-Strava / Final Surge ──> build_dashboard.py ──> dashboard.json ──> GitHub Pages
-                              (GitHub Action, every 30 min)              │
-                                                                         ▼
-                                                        Badger "runlog" app (WiFi)
+Garmin / Strava / Final Surge ──> build_dashboard.py ──> dashboard.json ──> GitHub Pages
+                                     (GitHub Action, every 30 min)              │
+                                                                               ▼
+                                                              Badger "runlog" app (WiFi)
 ```
 
 The published file looks like:
@@ -21,8 +21,8 @@ The published file looks like:
   "units": "mi",
   "updated": "2025-08-06T22:00:00Z",
   "people": [
-    {"name": "Jiaren", "planned": 42.0, "actual": 18.3},
-    {"name": "Ruby",   "planned": 35.0, "actual": 23.6}
+    {"name": "Ruby",   "planned": 35.0, "actual": 23.6},
+    {"name": "Jiaren", "planned": 42.0, "actual": 18.3}
   ]
 }
 ```
@@ -45,14 +45,16 @@ environment variables that do):
 | `units` | `"mi"` or `"km"` |
 | `timezone` | IANA name, e.g. `America/Los_Angeles`. Defines when the week rolls over. |
 | `output` | where to write the JSON (leave as `public/dashboard.json`). |
-| `people[].source` | `strava`, `finalsurge`, or `manual`. |
-| `people[].weekly_goal` | planned weekly miles (used as PLANNED for `strava`/`manual`, and as a fallback for `finalsurge`). |
+| `people[].source` | `strava`, `garmin`, `finalsurge`, or `manual`. |
+| `people[].weekly_goal` | planned weekly miles (used as PLANNED for `strava`/`garmin`/`manual`, and as a fallback for `finalsurge`). |
 | `people[].*_env` | the **name** of the env var / secret holding a credential. |
 
 Sources:
 
 - **`strava`** — ACTUAL = sum of this week's Strava runs. PLANNED = `weekly_goal`
-  (Strava has no training plan).
+  (Strava has no training plan). Strava's API is free for personal use.
+- **`garmin`** — ACTUAL = sum of this week's Garmin runs (via the unofficial
+  `garminconnect` login — no partner approval needed). PLANNED = `weekly_goal`.
 - **`finalsurge`** — PLANNED **and** ACTUAL come from the Final Surge plan.
 - **`manual`** — PLANNED = `weekly_goal`, ACTUAL = `manual_actual` (edit by hand).
 
@@ -81,6 +83,27 @@ pip install -r requirements.txt
 
    Approve in the browser, paste the `code` from the redirect URL, and copy the
    printed `refresh_token` into `.env` (e.g. `STRAVA_REFRESH_TOKEN_JIAREN`).
+
+### Garmin (once per Garmin person)
+
+Garmin's official Activity API needs partner approval, so this uses the
+unofficial `garminconnect` library (same login you use on connect.garmin.com).
+Logging in fresh on every CI run can trip MFA / bot checks, so mint a **token
+blob once locally** and store that instead:
+
+```bash
+python garmin_setup.py
+# enter email, password, and an MFA code if prompted
+```
+
+Copy the printed `GARMIN_TOKENS_BASE64` value into `.env` (and later into GitHub
+secrets). The build resumes that session with no password and no MFA; Garmin
+tokens refresh themselves and last ~a year. Re-run `garmin_setup.py` if it ever
+expires.
+
+*Local-only fallback:* you can skip the token and set `GARMIN_EMAIL` /
+`GARMIN_PASSWORD` in `.env` instead, but that may prompt MFA and isn't reliable
+in CI.
 
 ### Final Surge (once per Final Surge person)
 
@@ -123,9 +146,10 @@ and publishes `backend/public/` to GitHub Pages.
 1. Push this repo to GitHub.
 2. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
 3. **Settings → Secrets and variables → Actions → New repository secret**, add
-   the same names as in `.env`:
-   - `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN_JIAREN`
-   - `FINALSURGE_EMAIL_RUBY`, `FINALSURGE_PASSWORD_RUBY`
+   the names your `config.json` actually references, e.g.:
+   - Garmin: `GARMIN_TOKENS_BASE64` (preferred) *or* `GARMIN_EMAIL` + `GARMIN_PASSWORD`
+   - Strava: `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN_JIAREN`
+   - Final Surge: `FINALSURGE_EMAIL_RUBY`, `FINALSURGE_PASSWORD_RUBY`
 4. Run the workflow once from the **Actions** tab (or push a commit).
 
 Your public URL will be:
@@ -160,17 +184,20 @@ weather/air-quality and a "Demo" footer.
 
 | file | purpose |
 |------|---------|
-| `build_dashboard.py` | the aggregator (Strava + Final Surge + manual). |
+| `build_dashboard.py` | the aggregator (Strava + Garmin + Final Surge + manual). |
 | `strava_setup.py` | one-time helper to mint a Strava refresh token. |
+| `garmin_setup.py` | one-time helper to mint a Garmin token blob (`GARMIN_TOKENS_BASE64`). |
 | `config.example.json` | template config (copy to `config.json`). |
 | `.env.example` | template secrets (copy to `.env`). |
-| `requirements.txt` | just `requests`. |
+| `requirements.txt` | `requests` + `garminconnect`. |
 | `public/` | published directory; `dashboard.json` is written here. |
 
 ## Notes & limitations
 
-- **Garmin** is intentionally not used: its Activity API is partner-gated and not
-  practical for a personal project. Use Strava (Garmin can auto-sync to Strava).
-- Distances are converted to your `units`. Strava is always meters; Final Surge
-  is assumed meters unless a unit field is present.
+- **Garmin** uses the unofficial `garminconnect` login (the official Activity API
+  is partner-gated). Mint a token once with `garmin_setup.py` so CI never needs
+  your password or an MFA code. Strava's API, by contrast, is free for personal
+  use if you'd rather use that.
+- Distances are converted to your `units`. Strava and Garmin are always meters;
+  Final Surge is assumed meters unless a unit field is present.
 - "This week" starts **Monday 00:00** in your configured timezone.
