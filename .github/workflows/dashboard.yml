@@ -1,0 +1,60 @@
+name: Build training dashboard
+
+on:
+  schedule:
+    # Every 30 minutes. Cron is UTC. Adjust as you like.
+    - cron: "*/30 * * * *"
+  workflow_dispatch: {}   # allow manual runs from the Actions tab
+  push:
+    branches: [ main ]
+    paths:
+      - "backend/**"
+      - ".github/workflows/dashboard.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one publish at a time; let the newest run win.
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r backend/requirements.txt
+
+      - name: Build dashboard.json
+        working-directory: backend
+        env:
+          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
+          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
+          STRAVA_REFRESH_TOKEN_JIAREN: ${{ secrets.STRAVA_REFRESH_TOKEN_JIAREN }}
+          FINALSURGE_EMAIL_RUBY: ${{ secrets.FINALSURGE_EMAIL_RUBY }}
+          FINALSURGE_PASSWORD_RUBY: ${{ secrets.FINALSURGE_PASSWORD_RUBY }}
+        run: python build_dashboard.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: backend/public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

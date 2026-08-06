@@ -1,0 +1,20 @@
+{
+  "units": "mi",
+  "timezone": "America/Los_Angeles",
+  "output": "public/dashboard.json",
+  "people": [
+    {
+      "name": "Ruby",
+      "source": "finalsurge",
+      "weekly_goal": 35,
+      "finalsurge_email_env": "FINALSURGE_EMAIL_RUBY",
+      "finalsurge_password_env": "FINALSURGE_PASSWORD_RUBY"
+    },
+    {
+      "name": "Jiaren",
+      "source": "strava",
+      "weekly_goal": 42,
+      "strava_refresh_token_env": "STRAVA_REFRESH_TOKEN_JIAREN"
+    }
+  ]
+}
