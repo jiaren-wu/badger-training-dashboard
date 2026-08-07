@@ -74,6 +74,10 @@ yellow = brushes.color(240, 214, 72)   # UV "moderate" (EPA UV colour scale)
 red = brushes.color(248, 81, 73)
 purple = brushes.color(188, 140, 255)
 cyan = brushes.color(56, 232, 225)
+# Extra green shades for the GitHub-style contribution grid (light->dark by mileage).
+green_dim = brushes.color(33, 110, 57)
+green_mid = brushes.color(46, 160, 84)
+red_dim = brushes.color(120, 52, 50)    # a "missed planned day" without shouting
 
 # ---------------------------------------------------------------------------
 # Config (populated from /secrets.py)
@@ -159,10 +163,14 @@ LOOKAHEAD_PER_PAGE = 4
 view = "week"
 page = 0
 wk_idx = 0
+chart_style = 0                # which progress-chart style is showing (0..NUM_STYLES-1)
+_wo_scroll_idx = None          # workout index the scroll timer is anchored to
+_wo_scroll_ts = 0             # io.ticks when the current workout day was opened
 today_iso = None              # "YYYY-MM-DD" from the network clock, when known
 _forced_date = None           # simulator/testing override, e.g. "2026-08-05"
-_forced_view = None           # simulator/testing override: "week" | "workout"
+_forced_view = None           # simulator/testing override: "week" | "workout" | "chart"
 _forced_wk = None             # simulator/testing override: workout day index
+_forced_style = None          # simulator/testing override: chart style index
 
 # ---------------------------------------------------------------------------
 # Demo data so the dashboard renders even with no WiFi / no backend yet.
@@ -294,6 +302,7 @@ def load_config():
     global NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS, night
     global WIFI_POWER_SAVE, NIGHT_REBOOT
     global _forced_date, _forced_view, _forced_wk, today_iso, view, wk_idx
+    global _forced_style, chart_style
     if config_loaded:
         return
     config_loaded = True
@@ -390,6 +399,13 @@ def load_config():
             wk_idx = _forced_wk
     except Exception:
         _forced_wk = None
+    try:
+        fs = os.getenv("RUNLOG_FORCE_STYLE")
+        if fs is not None and fs != "":
+            _forced_style = int(fs)
+            chart_style = _forced_style
+    except Exception:
+        _forced_style = None
 
 
 # ---------------------------------------------------------------------------
@@ -938,13 +954,13 @@ def fmt_mi(v):
 
 
 def pct_brush(p):
-    if p >= 100:
-        return green
-    if p >= 90:
-        return green
+    if p > 105:
+        return purple      # over-target (>105%): distinct from the on-target green
+    if p >= 95:
+        return green       # on target: 95-105%
     if p >= 60:
-        return orange
-    return red
+        return orange      # a bit under
+    return red             # well under
 
 
 # ---------------------------------------------------------------------------
@@ -1126,9 +1142,22 @@ def draw_person(person, y, units):
     screen.brush = phosphor
     screen.text(name, 8, y)
 
-    pct_txt = "%d%%" % int(round(pct))
+    # Percent readout. When nothing was planned but miles were run, "0%" is
+    # misleading -- show the bonus miles (green) instead. When both are 0 it's a
+    # genuine rest, shown dim.
+    if planned > 0:
+        pct_txt = "%d%%" % int(round(pct))
+        screen.brush = pct_brush(pct)
+        bar_pct = pct
+    elif actual > 0:
+        pct_txt = "+%s %s" % (fmt_dist(actual), units)
+        screen.brush = green
+        bar_pct = 100.0
+    else:
+        pct_txt = "rest"
+        screen.brush = gray
+        bar_pct = 0.0
     screen.font = small_font
-    screen.brush = pct_brush(pct)
     pw, _ = screen.measure_text(pct_txt)
     screen.text(pct_txt, 152 - pw, y)
 
@@ -1138,7 +1167,7 @@ def draw_person(person, y, units):
     screen.text(miles, 8, y + 10)
 
     # progress bar
-    draw_progress(8, y + 20, 144, 7, pct)
+    draw_progress(8, y + 20, 144, 7, bar_pct)
 
 
 def draw_sleep():
@@ -1688,7 +1717,7 @@ def draw_lookahead(p):
     screen.font = small_font
     rx = draw_footer_right(110)
     screen.brush = dim
-    hint = "UP/DN wks"
+    hint = "A/C chart"
     if 8 + screen.measure_text(hint)[0] <= rx - 6:
         screen.text(hint, 8, 110)
 
@@ -1795,28 +1824,435 @@ def draw_pastweeks(p):
     screen.font = small_font
     rx = draw_footer_right(110)
     screen.brush = dim
-    hint = "UP/DN wks"
+    hint = "A/C chart"
     if 8 + screen.measure_text(hint)[0] <= rx - 6:
         screen.text(hint, 8, 110)
 
 
 # ---------------------------------------------------------------------------
-# Single-workout detail page. Stepped through with A (prev) / C (next),
+# Progress charts (view == "chart"). Reached from a past/upcoming page with
+# A(LEFT)/C(RIGHT), which then cycle through the styles so they can be compared
+# on the badge. Every style plots the whole training block (past + current +
+# upcoming weeks) so the shape of the plan and how actuals track it are visible
+# at a glance. B returns home; UP/DOWN drop back to the week list.
+# ---------------------------------------------------------------------------
+CHART_LETTERS = ("A", "B", "C", "D", "E", "F")
+CHART_NAMES = ("BARS", "LINES", "CUMULATIVE", "RING", "HEAT", "BLOCKS")
+NUM_STYLES = 6
+
+
+def _chart_series():
+    """Whole block, chronological: past (oldest-first) + current + upcoming.
+
+    Returns (seq, now_idx) where seq[i] = {start, p (shared/peak plan miles),
+    a (team-average actual miles), ac [per-runner actual]} and now_idx is the
+    index of the current week (== number of past weeks).
+    """
+    past = dashboard_past()
+    _, weeks = dashboard_weeks()
+    seq = []
+    for wk in list(past) + list(weeks):
+        pl = [float(x or 0) for x in (list(wk.get("planned", [])) + [0, 0])[:2]]
+        ac = [float(x or 0) for x in (list(wk.get("actual", [])) + [0, 0])[:2]]
+        p = _shared_value(pl)
+        if p is None:
+            p = max(pl) if pl else 0.0
+        seq.append({"start": wk.get("start", ""), "p": float(p or 0),
+                    "a": (ac[0] + ac[1]) / 2.0, "ac": ac})
+    return seq, len(past)
+
+
+def _done_totals(seq, now_idx):
+    """Planned & team-actual miles over the *completed* (past) weeks only."""
+    pd = 0.0
+    ad = 0.0
+    for i in range(min(now_idx, len(seq))):
+        pd += seq[i]["p"]
+        ad += seq[i]["a"]
+    return pd, ad
+
+
+def _ratio_brush(r):
+    if r >= 1.0:
+        return green
+    if r >= 0.75:
+        return yellow
+    if r > 0.0:
+        return red
+    return track
+
+
+def _mi_brush(mi):
+    """GitHub-style intensity: darker green = more miles that day."""
+    if mi <= 0:
+        return track
+    if mi < 3:
+        return green_dim
+    if mi < 6:
+        return green_mid
+    return green
+
+
+def _ring(cx, cy, r, thick, frac, fg):
+    """Donut gauge: bg track ring + fg wedge for `frac` (0..1), hole punched."""
+    frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+    screen.brush = track
+    screen.draw(shapes.circle(cx, cy, r))
+    if frac > 0:
+        screen.brush = fg
+        screen.draw(shapes.pie(cx, cy, r, 180, 180 + 360.0 * frac))
+    screen.brush = background
+    screen.draw(shapes.circle(cx, cy, r - thick))
+
+
+def _now_marker(x, y, h):
+    screen.brush = phosphor
+    screen.draw(shapes.rectangle(x, y, 1, h))
+
+
+# --- A: weekly planned bars with an actual overlay --------------------------
+def _chart_bars(seq, now_idx, units):
+    PX, PY, PW, PH = 10, 22, 140, 64
+    n = len(seq)
+    maxv = 1.0
+    for w in seq:
+        maxv = max(maxv, w["p"], w["a"])
+    slot = PW / float(n)
+    bw = int(slot) - 1
+    if bw < 2:
+        bw = 2
+    y0 = PY + PH
+    for i in range(n):
+        w = seq[i]
+        x = int(PX + i * slot)
+        ph = int(w["p"] / maxv * PH)
+        if ph > 0:
+            screen.brush = track
+            screen.draw(shapes.rectangle(x, y0 - ph, bw, ph))
+        if i <= now_idx and w["a"] > 0:
+            ah = int(min(w["a"], maxv) / maxv * PH)
+            ratio = (w["a"] / w["p"] * 100.0) if w["p"] > 0 else 100.0
+            screen.brush = pct_brush(ratio)
+            screen.draw(shapes.rectangle(x, y0 - ah, bw, ah))
+    _now_marker(int(PX + (now_idx + 0.5) * slot), PY, PH)
+    screen.font = small_font
+    screen.brush = gray
+    screen.text("Wk %d/%d  peak %d%s" % (min(now_idx + 1, n), n,
+                int(round(maxv)), units), 8, y0 + 4)
+
+
+# --- B: planned vs actual line chart ----------------------------------------
+def _chart_lines(seq, now_idx, units):
+    PX, PY, PW, PH = 10, 22, 140, 64
+    n = len(seq)
+    den = max(n - 1, 1)
+    maxv = 1.0
+    for w in seq:
+        maxv = max(maxv, w["p"], w["a"])
+
+    def X(i):
+        return int(PX + i * PW / float(den))
+
+    def Y(v):
+        return int(PY + PH - (min(v, maxv) / maxv * PH))
+
+    screen.brush = gray
+    for i in range(n - 1):
+        screen.draw(shapes.line(X(i), Y(seq[i]["p"]), X(i + 1), Y(seq[i + 1]["p"]), 1))
+    last = min(now_idx, n - 1)
+    screen.brush = phosphor
+    for i in range(last):
+        screen.draw(shapes.line(X(i), Y(seq[i]["a"]), X(i + 1), Y(seq[i + 1]["a"]), 2))
+    _now_marker(X(last), PY, PH)
+    screen.font = small_font
+    screen.brush = gray
+    screen.text("plan", 8, PY + PH + 4)
+    screen.brush = phosphor
+    screen.text("actual", 40, PY + PH + 4)
+
+
+# --- C: cumulative planned vs actual (ahead / behind) -----------------------
+def _chart_cumulative(seq, now_idx, units):
+    PX, PY, PW, PH = 10, 22, 140, 60
+    n = len(seq)
+    slot = PW / float(n)
+    pcum = []
+    tot = 0.0
+    for w in seq:
+        tot += w["p"]
+        pcum.append(tot)
+    maxc = max(tot, 1.0)
+    y0 = PY + PH
+    acum = 0.0
+    for i in range(n):
+        if i <= now_idx:
+            acum += seq[i]["a"]
+            h = int(min(acum, maxc) / maxc * PH)
+            if h > 0:
+                screen.brush = green_mid
+                screen.draw(shapes.rectangle(int(PX + i * slot), y0 - h,
+                            int(slot) + 1, h))
+    screen.brush = gray
+    for i in range(n - 1):
+        x1 = int(PX + (i + 0.5) * slot)
+        x2 = int(PX + (i + 1.5) * slot)
+        screen.draw(shapes.line(x1, int(y0 - pcum[i] / maxc * PH),
+                    x2, int(y0 - pcum[i + 1] / maxc * PH), 1))
+    _now_marker(int(PX + (now_idx + 0.5) * slot), PY, PH)
+    pd, ad = _done_totals(seq, now_idx)
+    delta = ad - pd
+    screen.font = small_font
+    screen.brush = white
+    screen.text("%d/%d %s" % (int(round(ad)), int(round(tot)), units), 8, y0 + 4)
+    if delta >= 0:
+        screen.brush = green
+        screen.text("+%d ahead" % int(round(delta)), 80, y0 + 4)
+    else:
+        screen.brush = orange
+        screen.text("%d behind" % int(round(delta)), 80, y0 + 4)
+
+
+# --- D: progress ring (adherence over completed weeks) ----------------------
+def _chart_ring(seq, now_idx, units):
+    pd, ad = _done_totals(seq, now_idx)
+    adh = (ad / pd) if pd > 0 else 0.0
+    cx, cy, r, thick = 42, 60, 30, 9
+    _ring(cx, cy, r, thick, adh, pct_brush(adh * 100.0))
+    screen.font = large_font
+    screen.brush = white
+    pctxt = "%d%%" % int(round(adh * 100.0))
+    tw, th = screen.measure_text(pctxt)
+    screen.text(pctxt, cx - tw // 2, cy - th // 2)
+    n = len(seq)
+    sx = 88
+    screen.font = small_font
+    screen.brush = phosphor
+    screen.text("Week", sx, 26)
+    screen.brush = white
+    screen.text("%d / %d" % (min(now_idx + 1, n), n), sx, 36)
+    screen.brush = phosphor
+    screen.text("Banked", sx, 52)
+    screen.brush = white
+    screen.text("%d %s" % (int(round(ad)), units), sx, 62)
+    screen.brush = phosphor
+    screen.text("Planned", sx, 78)
+    screen.brush = white
+    screen.text("%d %s" % (int(round(pd)), units), sx, 88)
+
+
+# --- E: per-week heat strip, one row per runner -----------------------------
+def _chart_heat(seq, now_idx, units):
+    names, _ = dashboard_weeks()
+    n = len(seq)
+    x0 = 20
+    pitch = 8
+    if x0 + n * pitch > 152:
+        pitch = max(4, (152 - x0) // max(n, 1))
+    rows = (("R", 30), ("J", 46))
+    for k in range(2):
+        lbl, ry = rows[k]
+        screen.font = small_font
+        screen.brush = phosphor
+        screen.text(lbl, 8, ry)
+        for i in range(n):
+            w = seq[i]
+            x = x0 + i * pitch
+            if i > now_idx:
+                screen.brush = track
+            else:
+                a = w["ac"][k]
+                ratio = (a / w["p"]) if w["p"] > 0 else (1.0 if a > 0 else 0.0)
+                screen.brush = _ratio_brush(ratio)
+            screen.draw(shapes.rectangle(x, ry, pitch - 1, 7))
+            if i == now_idx:
+                screen.brush = phosphor
+                screen.draw(shapes.rectangle(x - 1, ry - 1, pitch + 1, 9).stroke(1))
+    # legend
+    screen.font = small_font
+    y = 64
+    screen.brush = green
+    screen.draw(shapes.rectangle(8, y, 6, 6))
+    screen.brush = gray
+    screen.text(">=100", 17, y)
+    screen.brush = yellow
+    screen.draw(shapes.rectangle(52, y, 6, 6))
+    screen.brush = gray
+    screen.text(">=75", 61, y)
+    screen.brush = red
+    screen.draw(shapes.rectangle(90, y, 6, 6))
+    screen.brush = gray
+    screen.text("low", 99, y)
+    screen.brush = phosphor
+    screen.text("[]=now", 122, y)
+
+
+# --- F: GitHub-style contribution grid (one square per day) -----------------
+def _chart_blocks(seq, now_idx, units):
+    days = dashboard_days()
+    if not days:
+        screen.font = small_font
+        screen.brush = gray
+        screen.text("No daily data", 8, 44)
+        return
+    ti = _today()
+    cw = 8
+    ch = 8
+    gx = 12
+    gy = 20
+    col = 0
+    for i in range(len(days)):
+        day = days[i]
+        date = day.get("date", "")
+        row = _weekday_mon0(date)
+        if row is None:
+            row = i % 7
+        if i > 0 and row == 0:
+            col += 1
+        x = gx + col * cw
+        y = gy + row * ch
+        mi = 0.0
+        planned = False
+        for wo in (day.get("workouts", []) or [])[:2]:
+            d = wo.get("done")
+            if d is not None:
+                try:
+                    mi = max(mi, float(d))
+                except Exception:
+                    pass
+            try:
+                if float(wo.get("dist", 0) or 0) > 0:
+                    planned = True
+            except Exception:
+                pass
+        past = (date <= ti) if ti else False
+        if mi > 0:
+            screen.brush = _mi_brush(mi)
+        elif planned and past:
+            screen.brush = red_dim
+        elif planned:
+            screen.brush = dim
+        else:
+            screen.brush = track
+        screen.draw(shapes.rectangle(x, y, cw - 1, ch - 1))
+        if ti and date == ti:
+            screen.brush = phosphor
+            screen.draw(shapes.rectangle(x - 1, y - 1, cw, ch).stroke(1))
+    # weekday initials down the left
+    screen.font = small_font
+    screen.brush = dim
+    for r, ch2 in enumerate(("M", "T", "W", "T", "F", "S", "S")):
+        screen.text(ch2, 4, gy + r * ch)
+    # legend
+    ly = gy + 7 * ch + 2
+    screen.brush = gray
+    screen.text("less", 12, ly)
+    screen.brush = green_dim
+    screen.draw(shapes.rectangle(40, ly, 6, 6))
+    screen.brush = green_mid
+    screen.draw(shapes.rectangle(48, ly, 6, 6))
+    screen.brush = green
+    screen.draw(shapes.rectangle(56, ly, 6, 6))
+    screen.brush = gray
+    screen.text("more", 66, ly)
+    screen.brush = red_dim
+    screen.draw(shapes.rectangle(96, ly, 6, 6))
+    screen.brush = gray
+    screen.text("miss", 105, ly)
+
+
+_CHART_FUNCS = (_chart_bars, _chart_lines, _chart_cumulative,
+                _chart_ring, _chart_heat, _chart_blocks)
+
+
+def draw_chart(style):
+    screen.brush = background
+    screen.clear()
+    style = style % NUM_STYLES
+    seq, now_idx = _chart_series()
+    units = dashboard.get("units", DIST_UNITS) if dashboard else "mi"
+
+    # ---- header ----
+    screen.font = small_font
+    screen.brush = phosphor
+    screen.text(CHART_NAMES[style], 8, 3)
+    tag = "%s %d/%d" % (CHART_LETTERS[style], style + 1, NUM_STYLES)
+    screen.brush = dim
+    tw, _ = screen.measure_text(tag)
+    screen.text(tag, 152 - tw, 3)
+    screen.draw(shapes.rectangle(8, 13, 144, 1))
+
+    if not seq:
+        screen.brush = gray
+        screen.text("No plan data", 8, 44)
+    else:
+        try:
+            _CHART_FUNCS[style](seq, now_idx, units)
+        except Exception as e:
+            screen.brush = gray
+            screen.text("chart error", 8, 44)
+            try:
+                print("chart error:", e)
+            except Exception:
+                pass
+
+    # ---- footer ----
+    screen.font = small_font
+    rx = draw_footer_right(110)
+    screen.brush = dim
+    hint = "A/C style B=home"
+    if 8 + screen.measure_text(hint)[0] <= rx - 6:
+        screen.text(hint, 8, 110)
+
+
+
 # seeded at today. When both runners share the workout it's shown once with
 # each runner's completion; if their plans differ it falls back to per-person.
 # Wednesday "group workouts" are quality efforts described by reps rather than
 # miles, so they get a dedicated Level 1 / Level 2 layout.
 # ---------------------------------------------------------------------------
+WO_SCROLL_HOLD_MS = 5000     # hold each line-window this long before scrolling
+WO_SCROLL_MAXLINES = 8       # cap wrap so a runaway spec can't scroll forever
+
+
+def _scroll_offset(total, visible, elapsed_ms):
+    """Top-line offset for a vertically scrolling text window: hold the top for
+    one dwell (~5s), step down one line per dwell, hold the bottom an extra
+    dwell, then loop back to the top. Whole lines only (no clip API)."""
+    max_off = total - visible
+    if max_off <= 0:
+        return 0
+    steps = max_off + 2                  # 0..max_off, plus one extra bottom pause
+    try:
+        i = int(elapsed_ms // WO_SCROLL_HOLD_MS) % steps
+    except Exception:
+        i = 0
+    return max_off if i > max_off else i
+
+
 def _draw_level(label, spec, color, y):
-    """Render an 'L1'/'L2' label plus its wrapped spec; return the next y."""
+    """Render an 'L1'/'L2' label plus its wrapped spec; return the next y.
+
+    Long specs wrap past two lines and gently scroll: the top holds ~5s, then a
+    fixed 2-line window steps down one line every 5s and loops. The reserved
+    height stays constant so L2 and the runner rows never shift while it moves.
+    """
     screen.font = small_font
     screen.brush = color
     screen.text(label, 8, y)
-    lines = _wrap(spec, 124, 2)          # spec column runs x=28..152
+    lines = _wrap(spec, 124, WO_SCROLL_MAXLINES)   # spec column runs x=28..152
     if not lines:
         return y + 11
+    visible = 2 if len(lines) > 2 else len(lines)
+    if len(lines) > visible:
+        try:
+            elapsed = io.ticks - _wo_scroll_ts
+        except Exception:
+            elapsed = 0
+        off = _scroll_offset(len(lines), visible, elapsed)
+    else:
+        off = 0
     screen.brush = white
-    for ln in lines:
+    for ln in lines[off:off + visible]:
         screen.text(ln, 28, y)
         y += 10
     return y + 3
@@ -1859,6 +2295,13 @@ def _draw_group_detail(detail, shared, wos, names, nn, units):
 
 
 def draw_workout(idx):
+    global _wo_scroll_idx, _wo_scroll_ts
+    if idx != _wo_scroll_idx:            # opened a different day -> restart scroll
+        _wo_scroll_idx = idx
+        try:
+            _wo_scroll_ts = io.ticks
+        except Exception:
+            _wo_scroll_ts = 0
     screen.brush = background
     screen.clear()
 
@@ -1998,7 +2441,7 @@ def _maybe_night_reboot():
 
 
 def _update_impl():
-    global started, page, view, wk_idx
+    global started, page, view, wk_idx, chart_style
     if not started:
         started = True
         load_config()
@@ -2024,12 +2467,16 @@ def _update_impl():
         if btn("BUTTON_DOWN"):
             if view == "workout":
                 wk_idx = jump_week(wk_idx, +1)   # next week's workout
+            elif view == "chart":
+                view = "week"                    # leave the chart, back to weeks
             else:
                 view = "week"
                 page = min(page + 1, max_page())
         elif btn("BUTTON_UP"):
             if view == "workout":
                 wk_idx = jump_week(wk_idx, -1)   # previous week's workout
+            elif view == "chart":
+                view = "week"                    # leave the chart, back to weeks
             else:
                 view = "week"
                 page = max(page - 1, min_page())
@@ -2038,6 +2485,10 @@ def _update_impl():
                 nxt = next_wk_idx(wk_idx)
                 if nxt is not None:
                     wk_idx = nxt
+            elif view == "chart":
+                chart_style = (chart_style + 1) % NUM_STYLES
+            elif page != 0:
+                view = "chart"                   # past/upcoming page -> progress chart
             elif has_any_workout():
                 view = "workout"
                 page = 0
@@ -2047,6 +2498,10 @@ def _update_impl():
                 prv = prev_wk_idx(wk_idx)
                 if prv is not None:
                     wk_idx = prv
+            elif view == "chart":
+                chart_style = (chart_style - 1) % NUM_STYLES
+            elif page != 0:
+                view = "chart"                   # past/upcoming page -> progress chart
             else:
                 prv = prev_from_today()
                 if prv is not None and dashboard_days():
@@ -2095,6 +2550,8 @@ def _update_impl():
     display_power(True)
     if view == "workout":
         draw_workout(wk_idx)
+    elif view == "chart":
+        draw_chart(chart_style)
     elif page < 0:
         draw_pastweeks(page)
     elif page > 0:
