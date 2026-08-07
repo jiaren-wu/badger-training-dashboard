@@ -488,16 +488,31 @@ def wlan_stop():
 def http_json(url):
     if urlopen is None:
         raise OSError("no network")
+    gc.collect()                       # defrag the heap before the TLS read
     response = urlopen(url, headers={"User-Agent": "GitHubBadge"})
-    data = b""
+    # Accumulate into a bytearray with extend() instead of `data += chunk`.
+    # The old bytes-concatenation reallocated and copied the whole buffer every
+    # chunk (quadratic), which fragmented MicroPython's small heap and made the
+    # ~18KB dashboard fetch fail on memory while TLS buffers were still live --
+    # surfacing as a connected-but-"Offline - retry" badge.
+    buf = bytearray()
     chunk = bytearray(512)
-    while True:
-        length = response.readinto(chunk)
-        if length == 0:
-            break
-        data += chunk[:length]
-    result = json.loads(data.decode("utf-8"))
-    del response, data, chunk
+    mv = memoryview(chunk)
+    try:
+        while True:
+            length = response.readinto(chunk)
+            if not length:
+                break
+            buf.extend(mv[:length])
+    finally:
+        try:
+            response.close()           # free the socket/TLS buffers before parse
+        except Exception:
+            pass
+    del response, mv, chunk
+    gc.collect()
+    result = json.loads(buf.decode("utf-8"))   # bytearray.decode avoids a copy
+    del buf
     gc.collect()
     return result
 
@@ -751,12 +766,19 @@ def step_refresh():
                 print("aqi error:", e)
     elif step == "dashboard":
         if connected:
-            try:
-                gc.collect()  # free heap before the TLS handshake (ESP32)
-                if fetch_dashboard():
-                    running_live = True
-            except Exception as e:
-                print("dashboard error:", e)
+            # The dashboard is the largest payload (~18KB), so a single TLS read
+            # can fail transiently under memory pressure. Try a couple of times
+            # (with a gc between) before giving up for this cycle; the offline
+            # cache still covers a full failure.
+            for attempt in range(2):
+                try:
+                    gc.collect()  # free heap before the TLS handshake
+                    if fetch_dashboard():
+                        running_live = True
+                        break
+                except Exception as e:
+                    print("dashboard error:", e)
+                    gc.collect()
     elif step == "finish":
         if weather is None:
             weather = dict(DEMO_WEATHER)
