@@ -9,7 +9,9 @@ For every configured person we compute PLANNED and ACTUAL running mileage:
             Some plans (e.g. the Fleet Feet marathon plans) encode weekly
             mileage as free text at two levels ("Level 1: ~19 miles /
             Level 2: ~23 miles"); we parse that text using each person's
-            configured "finalsurge_level" (default 2). If a person has no
+            configured "finalsurge_level" (default 2). An optional
+            "finalsurge_level_overrides" map (e.g. {"Wed": 2}) picks a
+            different level for specific days of the week. If a person has no
             Final Surge account, or a given week has no parseable planned
             distance, that week's planned mileage is 0.
 
@@ -332,6 +334,42 @@ def _planned_meters(w, level=DEFAULT_FS_LEVEL):
     return 0.0
 
 
+# Day-of-week names (any casing / 3-letter abbrev) -> Python weekday index.
+_WEEKDAY_IDX = {}
+for _i, _names in enumerate((
+        ("mon", "monday"), ("tue", "tues", "tuesday"), ("wed", "weds", "wednesday"),
+        ("thu", "thur", "thurs", "thursday"), ("fri", "friday"),
+        ("sat", "saturday"), ("sun", "sunday"))):
+    for _n in _names:
+        _WEEKDAY_IDX[_n] = _i
+
+
+def _normalize_level_overrides(raw):
+    """Config {"Wed": 2, ...} -> {weekday_index: level}. Ignores bad entries."""
+    out = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            idx = _WEEKDAY_IDX.get(str(k).strip().lower())
+            try:
+                lvl = int(v)
+            except (TypeError, ValueError):
+                continue
+            if idx is not None and lvl in (1, 2):
+                out[idx] = lvl
+    return out
+
+
+def _resolve_level(w, level, overrides):
+    """Plan level for one workout: a per-weekday override wins over ``level``."""
+    if overrides:
+        d = _workout_date(w)
+        if d is not None:
+            ov = overrides.get(d.weekday())
+            if ov is not None:
+                return ov
+    return level
+
+
 def finalsurge_planned_by_week(email, password, mondays, units,
                                level=DEFAULT_FS_LEVEL):
     """Return {monday_iso: planned_units} across the full lookahead range."""
@@ -342,14 +380,15 @@ def finalsurge_planned_by_week(email, password, mondays, units,
     return _planned_by_week(workouts, units, level)
 
 
-def _planned_by_week(workouts, units, level=DEFAULT_FS_LEVEL):
+def _planned_by_week(workouts, units, level=DEFAULT_FS_LEVEL, overrides=None):
     """Weekly planned mileage {monday_iso: units}.
 
     The weekly total is the sum of the week's run-type workouts (each run's
     per-level mileage parsed from its description). Coaching tips, cross-
     training (given in minutes) and the plan's own weekly-summary total entry
     are skipped so they never inflate or double-count the total. Weeks with no
-    parseable running mileage are omitted (planned = 0).
+    parseable running mileage are omitted (planned = 0). A per-weekday level
+    override (e.g. Wednesday on level 2) is honored per workout.
     """
     buckets = {}
     for w in workouts:
@@ -358,7 +397,7 @@ def _planned_by_week(workouts, units, level=DEFAULT_FS_LEVEL):
         d = _workout_date(w)
         if not d:
             continue
-        m = _planned_meters(w, level)
+        m = _planned_meters(w, _resolve_level(w, level, overrides))
         if m <= 0:
             continue
         key = (d - dt.timedelta(days=d.weekday())).isoformat()
@@ -411,12 +450,14 @@ def _counts_as_planned_run(w):
     return bool(_first_number(planned, ["Distance", "distance", "PlannedDistance"]))
 
 
-def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL):
+def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL,
+                    overrides=None):
     """Per-day planned detail keyed by ISO date: {iso: {'dist':units,'title':str}}.
 
     When `monday` is a week's Monday, only that Mon..Sun window is returned; pass
     `monday=None` to bucket every workout in `workouts` (the whole fetched range),
-    which is what the multi-week plan calendar uses.
+    which is what the multi-week plan calendar uses. A per-weekday level override
+    (e.g. Wednesday on level 2) is applied per workout.
     """
     lo = hi = None
     if monday is not None:
@@ -432,7 +473,8 @@ def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL):
         iso = d.isoformat()
         e = out.get(iso) or {"dist": 0.0, "title": ""}
         if _counts_as_planned_run(w):
-            e["dist"] += to_units(_planned_meters(w, level), units)
+            e["dist"] += to_units(
+                _planned_meters(w, _resolve_level(w, level, overrides)), units)
         title = _workout_title(w)
         is_run = _is_run_workout(w)
         # Prefer a real run's title over coaching tips / cross-training notes.
@@ -446,18 +488,19 @@ def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL):
 
 
 def finalsurge_plan(email, password, mondays, units, current_monday,
-                    level=DEFAULT_FS_LEVEL):
+                    level=DEFAULT_FS_LEVEL, overrides=None):
     """One login + one fetch -> (planned_by_week_map, full_range_day_map).
 
     The day map spans the entire fetched range (every week, not just the current
     one) so the badge can show planned workouts for past and upcoming weeks too.
+    ``overrides`` maps a weekday index to a plan level (e.g. Wednesday -> 2).
     """
     token, user_key = finalsurge_login(email, password)
     start = mondays[0].date().isoformat()
     end = (mondays[-1] + dt.timedelta(days=6)).date().isoformat()
     workouts = finalsurge_workouts(token, user_key, start, end)
-    return (_planned_by_week(workouts, units, level),
-            finalsurge_days(workouts, None, units, level))
+    return (_planned_by_week(workouts, units, level, overrides),
+            finalsurge_days(workouts, None, units, level, overrides))
 
 
 # ---------------------------------------------------------------------------
@@ -489,11 +532,13 @@ def build_payload(cfg, units, tzname):
         fs_email = env_opt(p.get("finalsurge_email_env"))
         fs_password = env_opt(p.get("finalsurge_password_env"))
         fs_level = int(p.get("finalsurge_level") or DEFAULT_FS_LEVEL)
+        fs_overrides = _normalize_level_overrides(
+            p.get("finalsurge_level_overrides"))
         if fs_email and fs_password:
             try:
                 planned, fs_days = finalsurge_plan(
                     fs_email, fs_password, all_mondays, units, base_monday,
-                    fs_level)
+                    fs_level, fs_overrides)
             except Exception as e:
                 print("WARN: Final Surge for %s failed: %s" % (name, e),
                       file=sys.stderr)

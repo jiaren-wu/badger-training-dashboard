@@ -11,7 +11,7 @@
       "garmin_password_env": "GARMIN_PASSWORD_RB",
       "finalsurge_email_env": "FINALSURGE_EMAIL_RB",
       "finalsurge_password_env": "FINALSURGE_PASSWORD_RB",
-      "finalsurge_level": 2
+      "finalsurge_level": 1
     },
     {
       "name": "OSK",
@@ -20,7 +20,8 @@
       "garmin_password_env": "GARMIN_PASSWORD_OSK",
       "finalsurge_email_env": "FINALSURGE_EMAIL_OSK",
       "finalsurge_password_env": "FINALSURGE_PASSWORD_OSK",
-      "finalsurge_level": 2
+      "finalsurge_level": 1,
+      "finalsurge_level_overrides": { "Wed": 2 }
     }
   ]
 }
