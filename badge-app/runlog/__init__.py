@@ -637,6 +637,19 @@ def fmt_dist(v):
         return "0.0"
 
 
+def fmt_mi(v):
+    """Compact whole-mile string for the multi-week tables.
+
+    Keeps each cell narrow (e.g. "6/23" instead of "6.2/23.0") so the two
+    person columns never collide on the 160px-wide screen.  The current-week
+    page keeps full decimal precision via fmt_dist.
+    """
+    try:
+        return "%d" % int(round(float(v)))
+    except Exception:
+        return "0"
+
+
 def pct_brush(p):
     if p >= 100:
         return green
@@ -645,6 +658,71 @@ def pct_brush(p):
     if p >= 60:
         return orange
     return red
+
+
+def battery_pct():
+    """Best-effort battery percentage (0-100), or None when unavailable.
+
+    badgeware's `io` battery API is undocumented (io.md lists it as TODO), so we
+    probe the common attribute names and normalize whatever we get: a 0-1
+    fraction, a 0-100 percent, or a raw LiPo cell voltage.  Returns None if no
+    reading is exposed, in which case the footer simply omits the battery.
+    """
+    try:
+        for name in ("battery", "battery_level", "battery_percent",
+                     "battery_percentage", "bat", "charge"):
+            if not hasattr(io, name):
+                continue
+            v = getattr(io, name)
+            if callable(v):
+                try:
+                    v = v()
+                except Exception:
+                    continue
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                got = None
+                for f in ("percent", "percentage", "level", "value", "voltage"):
+                    if hasattr(v, f):
+                        vv = getattr(v, f)
+                        if callable(vv):
+                            try:
+                                vv = vv()
+                            except Exception:
+                                continue
+                        if isinstance(vv, (int, float)) and not isinstance(vv, bool):
+                            got = float(vv)
+                            break
+                if got is None:
+                    continue
+                v = got
+            v = float(v)
+            if 0.0 <= v <= 1.0:
+                pct = v * 100.0
+            elif 2.5 <= v <= 4.5:            # looks like a LiPo cell voltage
+                pct = (v - 3.3) / (4.2 - 3.3) * 100.0
+            elif 1.0 < v <= 100.0:
+                pct = v
+            else:
+                continue
+            return max(0, min(100, int(round(pct))))
+    except Exception:
+        pass
+    return None
+
+
+def footer_batt_clock():
+    """Footer-right text: battery% before the clock, e.g. "85% 07:52".
+
+    Either part is dropped when unknown; returns None when neither is available.
+    """
+    clock = night.hhmm(io.ticks) if night.has_time() else None
+    bp = battery_pct()
+    parts = []
+    if bp is not None:
+        parts.append("%d%%" % bp)
+    if clock:
+        parts.append(clock)
+    return " ".join(parts) if parts else None
 
 
 def draw_progress(x, y, w, h, pct):
@@ -982,7 +1060,7 @@ def draw():
     # ---- next-hour outlook: rain + AQI trend ----
     y2 = 27
     screen.font = small_font
-    screen.brush = dim
+    screen.brush = gray
     screen.text("1h", 8, y2)
     if weather is not None:
         prob = weather.get("rain_prob")
@@ -1026,6 +1104,15 @@ def draw():
 
     # ---- footer ----
     screen.font = small_font
+    # footer-right first: battery% before the local clock (or the refresh hint
+    # until the clock syncs).  Drawn first so the nav hint can dodge its edge.
+    clock = night.hhmm(io.ticks) if night.has_time() else "B refresh"
+    bp = battery_pct()
+    footer_r = (("%d%% " % bp) + clock) if bp is not None else clock
+    screen.brush = dim
+    rw, _ = screen.measure_text(footer_r)
+    rx = 152 - rw
+    screen.text(footer_r, rx, 110)
     if loading:
         screen.brush = blue
         screen.text("Updating...", 8, 110)
@@ -1038,26 +1125,22 @@ def draw():
             screen.brush = orange
         screen.text(status, 8, 110)
         # teach the newest key: C reveals today's/next workout when we have real
-        # plan detail; otherwise hint that upcoming weeks exist via DOWN.
+        # plan detail; otherwise hint that upcoming weeks exist via DOWN.  Only
+        # draw the hint when it fits without colliding with the right block.
         hint = "C plan" if has_any_workout() else ("v wks" if max_page() > 0 else "")
         if hint:
             sw, _ = screen.measure_text(status)
-            screen.brush = dim
-            screen.text(hint, 8 + sw + 6, 110)
-    # footer-right: local clock if known, else the refresh hint
-    if night.has_time():
-        footer_r = night.hhmm(io.ticks)
-    else:
-        footer_r = "B refresh"
-    screen.brush = dim
-    hw, _ = screen.measure_text(footer_r)
-    screen.text(footer_r, 152 - hw, 110)
+            hx = 8 + sw + 6
+            hwid, _ = screen.measure_text(hint)
+            if hx + hwid <= rx - 6:
+                screen.brush = dim
+                screen.text(hint, hx, 110)
 
 
 # ---------------------------------------------------------------------------
 # Upcoming-weeks page (planned mileage lookahead), shown when page > 0.
 # ---------------------------------------------------------------------------
-COL_R = (116, 152)   # right edges of the two person columns
+COL_R = (100, 152)   # right edges of the two person columns
 
 
 def draw_lookahead(p):
@@ -1104,7 +1187,7 @@ def draw_lookahead(p):
         planned = wk.get("planned", [])
         for i in range(ncol):
             v = planned[i] if i < len(planned) else 0
-            txt = fmt_dist(v)
+            txt = fmt_mi(v)
             screen.brush = white
             w, _ = screen.measure_text(txt)
             screen.text(txt, COL_R[i] - w, ry)
@@ -1114,8 +1197,8 @@ def draw_lookahead(p):
     screen.font = small_font
     screen.brush = dim
     screen.text("UP/DN weeks", 8, 110)
-    if night.has_time():
-        footer_r = night.hhmm(io.ticks)
+    footer_r = footer_batt_clock()
+    if footer_r:
         hw, _ = screen.measure_text(footer_r)
         screen.text(footer_r, 152 - hw, 110)
 
@@ -1173,7 +1256,7 @@ def draw_pastweeks(p):
         for i in range(ncol):
             pv = planned[i] if i < len(planned) else 0
             av = actual[i] if i < len(actual) else 0
-            txt = "%s/%s" % (fmt_dist(av), fmt_dist(pv))
+            txt = "%s/%s" % (fmt_mi(av), fmt_mi(pv))
             try:
                 pct = (float(av) / float(pv) * 100.0) if float(pv) > 0 else 0.0
                 screen.brush = pct_brush(pct) if float(pv) > 0 else white
@@ -1187,8 +1270,8 @@ def draw_pastweeks(p):
     screen.font = small_font
     screen.brush = dim
     screen.text("UP/DN weeks", 8, 110)
-    if night.has_time():
-        footer_r = night.hhmm(io.ticks)
+    footer_r = footer_batt_clock()
+    if footer_r:
         hw, _ = screen.measure_text(footer_r)
         screen.text(footer_r, 152 - hw, 110)
 
@@ -1266,8 +1349,8 @@ def draw_workout(idx):
     screen.font = small_font
     screen.brush = dim
     screen.text("A< B home C>", 8, 110)
-    if night.has_time():
-        footer_r = night.hhmm(io.ticks)
+    footer_r = footer_batt_clock()
+    if footer_r:
         hw, _ = screen.measure_text(footer_r)
         screen.text(footer_r, 152 - hw, 110)
 # ---------------------------------------------------------------------------
