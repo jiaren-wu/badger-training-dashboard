@@ -37,14 +37,19 @@ jobs:
       - name: Build dashboard.json
         working-directory: backend
         env:
-          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
-          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
-          STRAVA_REFRESH_TOKEN_OSK: ${{ secrets.STRAVA_REFRESH_TOKEN_OSK }}
-          GARMIN_TOKENS_BASE64: ${{ secrets.GARMIN_TOKENS_BASE64 }}
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          # Garmin -> ACTUAL mileage (one token blob per person, preferred).
+          GARMIN_TOKENS_BASE64_RB: ${{ secrets.GARMIN_TOKENS_BASE64_RB }}
+          GARMIN_TOKENS_BASE64_OSK: ${{ secrets.GARMIN_TOKENS_BASE64_OSK }}
+          # Optional email/password fallback per person.
+          GARMIN_EMAIL_RB: ${{ secrets.GARMIN_EMAIL_RB }}
+          GARMIN_PASSWORD_RB: ${{ secrets.GARMIN_PASSWORD_RB }}
+          GARMIN_EMAIL_OSK: ${{ secrets.GARMIN_EMAIL_OSK }}
+          GARMIN_PASSWORD_OSK: ${{ secrets.GARMIN_PASSWORD_OSK }}
+          # Final Surge -> PLANNED weekly mileage (optional; 26.2 mi fallback).
           FINALSURGE_EMAIL_RB: ${{ secrets.FINALSURGE_EMAIL_RB }}
           FINALSURGE_PASSWORD_RB: ${{ secrets.FINALSURGE_PASSWORD_RB }}
+          FINALSURGE_EMAIL_OSK: ${{ secrets.FINALSURGE_EMAIL_OSK }}
+          FINALSURGE_PASSWORD_OSK: ${{ secrets.FINALSURGE_PASSWORD_OSK }}
         run: python build_dashboard.py
 
       - name: Upload Pages artifact
