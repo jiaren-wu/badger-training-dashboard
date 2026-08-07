@@ -63,6 +63,7 @@ green = brushes.color(63, 210, 110)
 orange = brushes.color(255, 165, 0)
 red = brushes.color(248, 81, 73)
 purple = brushes.color(188, 140, 255)
+cyan = brushes.color(56, 232, 225)
 
 # ---------------------------------------------------------------------------
 # Config (populated from /secrets.py)
@@ -789,7 +790,7 @@ BATT_DOT["charging"] = blue
 BATT_DOT["low"] = red
 BATT_DOT["mid"] = orange
 BATT_DOT["high"] = green
-BATT_DOT["full"] = phosphor
+BATT_DOT["full"] = cyan
 
 
 def draw_footer_right(y, fallback=None):
@@ -1181,7 +1182,7 @@ def draw():
     # ---- next-hour outlook: rain + AQI trend ----
     y2 = 27
     screen.font = small_font
-    screen.brush = gray
+    screen.brush = white
     screen.text("1h", 8, y2)
     if weather is not None:
         prob = weather.get("rain_prob")
@@ -1462,8 +1463,8 @@ def draw_workout(idx):
     screen.font = small_font
     rx = draw_footer_right(110)
     screen.brush = dim
-    # A/C step days (across week boundaries); UP/DOWN jump a whole week; B home.
-    legend = "A/C day  ^v wk"
+    # A/C step days (across week boundaries, incl. into other weeks); B home.
+    legend = "A/C day"
     if 8 + screen.measure_text(legend)[0] <= rx - 6:
         screen.text(legend, 8, 110)
 # ---------------------------------------------------------------------------
