@@ -311,6 +311,67 @@ def _parse_level_miles(text, level=DEFAULT_FS_LEVEL):
     return found.get(1) if found.get(1) is not None else found.get(2)
 
 
+# "Level 1:" / "Level 2:" section markers used to split a quality-workout
+# description into its two per-level prescriptions.
+_FS_LEVEL_MARK = re.compile(r"level\s*([12])\s*:\s*", re.I)
+
+
+def _condense_spec(text):
+    """Collapse a multi-line spec block into one comma-joined line."""
+    out = []
+    for ln in (text or "").split("\n"):
+        ln = " ".join(ln.split())        # squeeze internal whitespace
+        if ln:
+            out.append(ln)
+    return ", ".join(out)
+
+
+def _level_detail(w):
+    """(headline, level1, level2) for a "quality" group workout, else Nones.
+
+    Group workouts (Intervals/Hills/Tempo) describe the session as reps for
+    each level (e.g. "Level 1: 4 x 1K Loops / Level 2: 5 x 1K Loops") rather
+    than a single "Level N: X miles" distance. Detail is only returned when the
+    description carries both level markers but NO plain per-level mileage (plain
+    runs are shown as a number instead). The headline is the workout type taken
+    from the first descriptive line (text before " - ").
+    """
+    desc = w.get("description") or w.get("Description") or ""
+    if not desc or _parse_level_miles(desc) is not None:
+        return (None, None, None)
+    marks = list(_FS_LEVEL_MARK.finditer(desc))
+    if len(marks) < 2:
+        return (None, None, None)
+    headline = ""
+    name = (w.get("name") or w.get("Name") or "").strip().lower()
+    for ln in desc.split("\n"):
+        s = ln.strip()
+        if not s or _FS_LEVEL_MARK.match(s):
+            continue
+        if s.lower() == name:            # skip a line that repeats the name
+            continue
+        headline = s.split(" - ")[0].strip()
+        break
+    specs = {}
+    for i, m in enumerate(marks):
+        lvl = int(m.group(1))
+        if lvl in specs:
+            continue
+        block = desc[m.end():(marks[i + 1].start() if i + 1 < len(marks)
+                              else len(desc))]
+        cut = block.find("\n\n")           # stop before trailing prose
+        if cut != -1:
+            block = block[:cut]
+        wk = re.search(r"\bworkout\s*:", block, re.I)
+        if wk:
+            block = block[:wk.start()]
+        specs[lvl] = _condense_spec(block)
+    l1, l2 = specs.get(1), specs.get(2)
+    if not (l1 or l2):
+        return (None, None, None)
+    return (headline or None, l1, l2)
+
+
 def _planned_meters(w, level=DEFAULT_FS_LEVEL):
     """Planned distance (meters) for one Final Surge workout record.
 
@@ -526,6 +587,11 @@ def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL,
         e = out.get(iso) or {"dist": 0.0, "title": "", "plan": False}
         if _counts_as_planned_run(w):
             e["plan"] = True
+            hl, l1, l2 = _level_detail(w)
+            if l1 or l2:
+                e["wtype"] = hl or ""
+                e["l1"] = l1 or ""
+                e["l2"] = l2 or ""
         title = _workout_title(w)
         is_run = _is_run_workout(w)
         # Prefer a real run's title over coaching tips / cross-training notes.
@@ -662,12 +728,20 @@ def build_payload(cfg, units, tzname):
                 fd = fs_day_maps[pi].get(iso) or {}
                 dist = round(float(fd.get("dist", 0.0) or 0.0), 1)
                 done = day_actual_maps[pi].get(iso)
-                workouts.append({
+                wo = {
                     "dist": dist,
                     "title": fd.get("title", "") or "",
                     "done": round(float(done), 1) if done is not None else None,
                     "plan": bool(fd.get("plan")),
-                })
+                }
+                # Quality group workout: carry the per-level prescription so the
+                # badge can show Level 1 / Level 2 detail instead of a distance.
+                if fd.get("l1") or fd.get("l2"):
+                    wo["l1"] = fd.get("l1", "") or ""
+                    wo["l2"] = fd.get("l2", "") or ""
+                    if fd.get("wtype"):
+                        wo["wtype"] = fd["wtype"]
+                workouts.append(wo)
             days.append({"date": iso, "dow": _DOW[d.weekday()],
                          "workouts": workouts})
 
