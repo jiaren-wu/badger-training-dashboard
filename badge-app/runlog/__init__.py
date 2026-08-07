@@ -81,13 +81,14 @@ DASHBOARD_URL = None          # optional: URL returning dashboard.json
 WEATHER_LOCATION = None       # optional: same formats as the weather app
 DIST_UNITS = "mi"             # "mi" or "km"
 WIFI_TIMEOUT = 60             # seconds to wait for association before giving up
-# Power saving: when True, the WiFi radio is powered down between refreshes and
-# only brought up for each fetch. Refreshes are 15 min apart (awake) / 60 min
-# (asleep), so the radio spends ~99% of its time off -> a big battery saving vs
-# staying associated 24/7. The refresh state machine already retries/self-heals
-# each cycle, so the only cost is a few seconds to re-associate per refresh.
-# Set WIFI_POWER_SAVE = False in /secrets.py if you ever see WiFi flakiness.
-WIFI_POWER_SAVE = True
+# Power saving: when True, the WiFi radio is powered down (disconnect +
+# active(False)) between refreshes and only brought up for each fetch. This
+# saves battery, BUT on this badge's WiFi chip a cold radio start can drop the
+# first connect(), leaving the badge stuck retrying and never re-associating.
+# So it's OFF by default -- the radio is brought up once at boot and stays
+# associated (the known-good behaviour). Only opt in (WIFI_POWER_SAVE = True in
+# /secrets.py) if you've confirmed reconnection is reliable on your network.
+WIFI_POWER_SAVE = False
 
 # Night mode: display goes dark between these hours (local time); any button
 # wakes it for WAKE_SECONDS. Overridable from /secrets.py.
@@ -438,7 +439,7 @@ def wlan_stop():
     the association is torn down and rebuilt each cycle instead of being held
     open 24/7. No-op / harmless under the simulator (network is None).
     """
-    global connected, ticks_start
+    global connected, ticks_start, wlan
     connected = False
     ticks_start = None
     if wlan is None:
@@ -451,6 +452,9 @@ def wlan_stop():
         wlan.active(False)
     except Exception:
         pass
+    # Drop the object so the next wlan_start() creates a fresh WLAN() and does a
+    # clean cold init -- more reliable than re-activating a powered-down radio.
+    wlan = None
 
 
 # ---------------------------------------------------------------------------
