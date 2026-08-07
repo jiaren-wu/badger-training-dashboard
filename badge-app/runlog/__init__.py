@@ -2009,8 +2009,17 @@ def _chart_cumulative(seq, now_idx, units):
     PX, PW = 10, 140
     slot = PW / float(n)
     PH = 26
+    # The plan starts on the first week that actually carries planned miles
+    # (e.g. next Monday); earlier weeks are base-building against a zero plan.
+    # Anchor the cumulative actual and the ahead/behind delta to that week so
+    # pre-plan running doesn't read as "ahead" of a plan that hasn't begun.
     panels = (("Ruby", 0, 16, rose), ("Jiaren", 1, 55, blue))
     for lbl, k, ty, idc in panels:
+        pstart = n
+        for i in range(n):
+            if seq[i]["pc"][k] > 0:
+                pstart = i
+                break
         pcum = []
         tot = 0.0
         for w in seq:
@@ -2020,7 +2029,7 @@ def _chart_cumulative(seq, now_idx, units):
         yb = ty + 10 + PH
         acum = 0.0
         for i in range(n):
-            if i <= now_idx:
+            if pstart <= i <= now_idx:
                 acum += seq[i]["ac"][k]
                 h = int(min(acum, maxc) / maxc * PH)
                 if h > 0:
@@ -2034,21 +2043,33 @@ def _chart_cumulative(seq, now_idx, units):
             screen.draw(shapes.line(x1, int(yb - pcum[i] / maxc * PH),
                         x2, int(yb - pcum[i + 1] / maxc * PH), 1))
         _now_marker(int(PX + (now_idx + 0.5) * slot), ty + 10, PH)
-        pd = ad = 0.0
-        for i in range(min(now_idx, n)):
-            pd += seq[i]["pc"][k]
-            ad += seq[i]["ac"][k]
-        delta = ad - pd
         screen.font = small_font
         screen.brush = idc
         screen.text(lbl, 8, ty)
         lw, _ = screen.measure_text(lbl)
-        if delta >= 0:
-            screen.brush = green
-            screen.text("+%d ahead" % int(round(delta)), 8 + lw + 6, ty)
+        if now_idx < pstart:
+            # Plan hasn't started yet: show when it does, not a bogus delta.
+            when = "soon"
+            if pstart < n:
+                try:
+                    p = seq[pstart]["start"].split("-")
+                    when = "%d/%d" % (int(p[1]), int(p[2]))
+                except Exception:
+                    pass
+            screen.brush = gray
+            screen.text("starts %s" % when, 8 + lw + 6, ty)
         else:
-            screen.brush = orange
-            screen.text("%d behind" % int(round(delta)), 8 + lw + 6, ty)
+            pd = ad = 0.0
+            for i in range(pstart, min(now_idx, n)):
+                pd += seq[i]["pc"][k]
+                ad += seq[i]["ac"][k]
+            delta = ad - pd
+            if delta >= 0:
+                screen.brush = green
+                screen.text("+%d ahead" % int(round(delta)), 8 + lw + 6, ty)
+            else:
+                screen.brush = orange
+                screen.text("%d behind" % int(round(delta)), 8 + lw + 6, ty)
 
 
 # --- D: two adherence rings, one per runner (Ruby + Jiaren) -----------------
