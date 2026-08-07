@@ -60,7 +60,7 @@ WIFI_PASSWORD = None
 DASHBOARD_URL = None          # optional: URL returning dashboard.json
 WEATHER_LOCATION = None       # optional: same formats as the weather app
 DIST_UNITS = "mi"             # "mi" or "km"
-WIFI_TIMEOUT = 45
+WIFI_TIMEOUT = 60             # seconds to wait for association before giving up
 
 # Night mode: display goes dark between these hours (local time); any button
 # wakes it for WAKE_SECONDS. Overridable from /secrets.py.
@@ -92,6 +92,7 @@ last_update = None
 auto_refresh = True
 AUTO_REFRESH_MS = 15 * 60 * 1000   # 15 minutes (awake)
 NIGHT_REFRESH_MS = 60 * 60 * 1000  # 1 hour (slower cadence while asleep)
+RETRY_REFRESH_MS = 60 * 1000       # 60s: retry quickly while not live (self-heal)
 
 # Night mode controller (local clock from network time + io.ticks).
 night = NightMode(NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS * 1000)
@@ -285,22 +286,40 @@ def wlan_start():
     global wlan, ticks_start, connected
     if network is None or not WIFI_SSID:
         return False
-    if ticks_start is None:
-        ticks_start = io.ticks
-    if connected:
-        return True
     if wlan is None:
         wlan = network.WLAN(network.STA_IF)
-        wlan.active(True)
-        if wlan.isconnected():
-            connected = True
-            return True
-        wlan.connect(WIFI_SSID, WIFI_PASSWORD)
-        print("Connecting to WiFi...")
-    connected = wlan.isconnected()
-    if connected:
+    try:
+        if not wlan.active():
+            wlan.active(True)
+    except Exception:
+        pass
+    # Already associated (and has an IP)?  Fast path.
+    if wlan.isconnected():
+        connected = True
+        ticks_start = None
+        return True
+    connected = False
+    # Begin (or re-arm) an association attempt with a fresh timeout window.
+    # ticks_start is reset to None at the start of every refresh cycle and after
+    # each failure, so a dropped/again-in-range network is retried cleanly
+    # instead of getting stuck on "WiFi failed" until a manual reboot.
+    if ticks_start is None:
+        ticks_start = io.ticks
+        try:
+            wlan.disconnect()
+        except Exception:
+            pass
+        try:
+            wlan.connect(WIFI_SSID, WIFI_PASSWORD)
+            print("Connecting to WiFi...")
+        except Exception as e:
+            print("wifi connect error:", e)
+    if wlan.isconnected():
+        connected = True
+        ticks_start = None
         return True
     if io.ticks - ticks_start > WIFI_TIMEOUT * 1000:
+        ticks_start = None      # re-arm for a clean retry on the next cycle
         return False
     return None  # still trying
 
@@ -500,12 +519,13 @@ def fetch_dashboard():
 # Refresh state machine (one network step per frame)
 # ---------------------------------------------------------------------------
 def start_refresh():
-    global refresh_queue, loading, running_live, weather_live
+    global refresh_queue, loading, running_live, weather_live, ticks_start
     # Fetch the dashboard first (right after WiFi) so its TLS handshake runs
     # while the ESP32 heap is freshest. Doing location/weather/aqi first can
     # fragment memory enough that the 4th HTTPS handshake (dashboard) fails,
     # which showed up as live weather but an "Offline - retry" dashboard.
     refresh_queue = ["wifi", "dashboard", "location", "weather", "aqi", "finish"]
+    ticks_start = None    # re-arm a fresh WiFi association attempt each cycle
     loading = True
     running_live = False
     weather_live = False
@@ -1421,6 +1441,8 @@ def _update_impl():
     # radio/network use low overnight. The refresh steps run at the top of each
     # frame, so it still completes while the screen stays dark.
     _interval = NIGHT_REFRESH_MS if night.should_sleep(io.ticks) else AUTO_REFRESH_MS
+    if not running_live and not night.should_sleep(io.ticks):
+        _interval = RETRY_REFRESH_MS   # not live yet -> retry quickly to self-heal
     if (auto_refresh and refresh_queue is None and last_update is not None
             and io.ticks - last_update > _interval):
         start_refresh()
