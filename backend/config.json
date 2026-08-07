@@ -21,7 +21,7 @@
       "finalsurge_email_env": "FINALSURGE_EMAIL_OSK",
       "finalsurge_password_env": "FINALSURGE_PASSWORD_OSK",
       "finalsurge_level": 1,
-      "finalsurge_level_overrides": { "Wed": 2 }
+      "finalsurge_level_overrides": { "Thu": 2 }
     }
   ]
 }
