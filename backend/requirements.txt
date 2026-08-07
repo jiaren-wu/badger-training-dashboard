@@ -1,2 +1,2 @@
 requests>=2.31,<3
-garminconnect>=0.2   # unofficial Garmin Connect client (only needed for "garmin" source)
+garminconnect>=0.3.8,<0.4   # unofficial Garmin Connect client (only needed for "garmin" source)
