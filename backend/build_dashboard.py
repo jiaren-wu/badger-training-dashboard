@@ -728,12 +728,22 @@ def build_payload(cfg, units, tzname):
                 fd = fs_day_maps[pi].get(iso) or {}
                 dist = round(float(fd.get("dist", 0.0) or 0.0), 1)
                 done = day_actual_maps[pi].get(iso)
-                wo = {
-                    "dist": dist,
-                    "title": fd.get("title", "") or "",
-                    "done": round(float(done), 1) if done is not None else None,
-                    "plan": bool(fd.get("plan")),
-                }
+                title = fd.get("title", "") or ""
+                # Emit only non-default fields. The badge reads every workout
+                # key with a .get() default, so omitting zeros/blanks/nulls is
+                # invisible to it but roughly halves the (91-day) payload -- and
+                # the whole file must fit the badge's small TLS/heap budget or
+                # the fetch fails ("Offline - retry"). The badge is the only
+                # consumer of dashboard.json, so this is safe.
+                wo = {}
+                if dist:
+                    wo["dist"] = dist
+                if title:
+                    wo["title"] = title
+                if done is not None:
+                    wo["done"] = round(float(done), 1)
+                if fd.get("plan"):
+                    wo["plan"] = True
                 # Quality group workout: carry the per-level prescription so the
                 # badge can show Level 1 / Level 2 detail instead of a distance.
                 if fd.get("l1") or fd.get("l2"):
