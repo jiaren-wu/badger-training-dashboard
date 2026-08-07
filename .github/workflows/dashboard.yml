@@ -37,14 +37,19 @@ jobs:
       - name: Build dashboard.json
         working-directory: backend
         env:
-          STRAVA_CLIENT_ID: ${{ secrets.STRAVA_CLIENT_ID }}
-          STRAVA_CLIENT_SECRET: ${{ secrets.STRAVA_CLIENT_SECRET }}
-          STRAVA_REFRESH_TOKEN_JIAREN: ${{ secrets.STRAVA_REFRESH_TOKEN_JIAREN }}
-          GARMIN_TOKENS_BASE64: ${{ secrets.GARMIN_TOKENS_BASE64 }}
-          GARMIN_EMAIL: ${{ secrets.GARMIN_EMAIL }}
-          GARMIN_PASSWORD: ${{ secrets.GARMIN_PASSWORD }}
+          # Garmin -> ACTUAL mileage (one token blob per person, preferred).
+          GARMIN_TOKENS_BASE64_RUBY: ${{ secrets.GARMIN_TOKENS_BASE64_RUBY }}
+          GARMIN_TOKENS_BASE64_JIAREN: ${{ secrets.GARMIN_TOKENS_BASE64_JIAREN }}
+          # Optional email/password fallback per person.
+          GARMIN_EMAIL_RUBY: ${{ secrets.GARMIN_EMAIL_RUBY }}
+          GARMIN_PASSWORD_RUBY: ${{ secrets.GARMIN_PASSWORD_RUBY }}
+          GARMIN_EMAIL_JIAREN: ${{ secrets.GARMIN_EMAIL_JIAREN }}
+          GARMIN_PASSWORD_JIAREN: ${{ secrets.GARMIN_PASSWORD_JIAREN }}
+          # Final Surge -> PLANNED weekly mileage (optional; 26.2 mi fallback).
           FINALSURGE_EMAIL_RUBY: ${{ secrets.FINALSURGE_EMAIL_RUBY }}
           FINALSURGE_PASSWORD_RUBY: ${{ secrets.FINALSURGE_PASSWORD_RUBY }}
+          FINALSURGE_EMAIL_JIAREN: ${{ secrets.FINALSURGE_EMAIL_JIAREN }}
+          FINALSURGE_PASSWORD_JIAREN: ${{ secrets.FINALSURGE_PASSWORD_JIAREN }}
         run: python build_dashboard.py
 
       - name: Upload Pages artifact
