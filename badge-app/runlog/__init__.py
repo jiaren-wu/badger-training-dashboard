@@ -1514,10 +1514,14 @@ def draw():
     if aqi:
         label, brush = aqi_style(aqi.get("us_aqi"))
         val = aqi.get("us_aqi")
-        aq = "AQI %s %s" % ("--" if val is None else int(val), label)
+        aq_val = "%s %s" % ("--" if val is None else int(val), label)
+        pw, _ = screen.measure_text("AQI ")
+        vw, _ = screen.measure_text(aq_val)
+        x0 = 152 - (pw + vw)
+        screen.brush = white
+        screen.text("AQI ", x0, y)
         screen.brush = brush
-        aw, _ = screen.measure_text(aq)
-        screen.text(aq, 152 - aw, y)
+        screen.text(aq_val, x0 + pw, y)
 
     # ---- next-hour outlook: rain (left) + AQI trend (right) ----
     y2 = 27
@@ -1545,7 +1549,7 @@ def draw():
     if aqi is not None:
         nxt = aqi.get("next")
         if nxt is None:
-            nx_txt = "AQI --"
+            nx_val = "--"
             nx_brush = gray
         else:
             now_i = aqi_cat(aqi.get("us_aqi"))
@@ -1556,11 +1560,15 @@ def draw():
                 trend = "dn"
             else:
                 trend = "flat"
-            nx_txt = "AQI %d %s" % (int(nxt), trend)
+            nx_val = "%d %s" % (int(nxt), trend)
             _, nx_brush = aqi_style(nxt)
+        pw, _ = screen.measure_text("AQI ")
+        vw, _ = screen.measure_text(nx_val)
+        x0 = 152 - (pw + vw)
+        screen.brush = white
+        screen.text("AQI ", x0, y2)
         screen.brush = nx_brush
-        nw, _ = screen.measure_text(nx_txt)
-        screen.text(nx_txt, 152 - nw, y2)
+        screen.text(nx_val, x0 + pw, y2)
 
     # ---- people ----
     py = 40
