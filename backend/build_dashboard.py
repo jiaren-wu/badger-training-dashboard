@@ -412,12 +412,22 @@ def _counts_as_planned_run(w):
 
 
 def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL):
-    """Per-day planned detail for ONE week: {iso: {'dist':units,'title':str}}."""
-    sunday = monday.date() + dt.timedelta(days=6)
+    """Per-day planned detail keyed by ISO date: {iso: {'dist':units,'title':str}}.
+
+    When `monday` is a week's Monday, only that Mon..Sun window is returned; pass
+    `monday=None` to bucket every workout in `workouts` (the whole fetched range),
+    which is what the multi-week plan calendar uses.
+    """
+    lo = hi = None
+    if monday is not None:
+        lo = monday.date()
+        hi = lo + dt.timedelta(days=6)
     out = {}
     for w in workouts:
         d = _workout_date(w)
-        if not d or d < monday.date() or d > sunday:
+        if not d:
+            continue
+        if lo is not None and (d < lo or d > hi):
             continue
         iso = d.isoformat()
         e = out.get(iso) or {"dist": 0.0, "title": ""}
@@ -437,13 +447,17 @@ def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL):
 
 def finalsurge_plan(email, password, mondays, units, current_monday,
                     level=DEFAULT_FS_LEVEL):
-    """One login + one fetch -> (planned_by_week_map, current_week_day_map)."""
+    """One login + one fetch -> (planned_by_week_map, full_range_day_map).
+
+    The day map spans the entire fetched range (every week, not just the current
+    one) so the badge can show planned workouts for past and upcoming weeks too.
+    """
     token, user_key = finalsurge_login(email, password)
     start = mondays[0].date().isoformat()
     end = (mondays[-1] + dt.timedelta(days=6)).date().isoformat()
     workouts = finalsurge_workouts(token, user_key, start, end)
-    return _planned_by_week(workouts, units, level), finalsurge_days(
-        workouts, current_monday, units, level)
+    return (_planned_by_week(workouts, units, level),
+            finalsurge_days(workouts, None, units, level))
 
 
 # ---------------------------------------------------------------------------
@@ -464,8 +478,8 @@ def build_payload(cfg, units, tzname):
     names = [p.get("name", "?") for p in people]
 
     planned_maps = []        # per person: {monday_iso: planned_units}
-    fs_day_maps = []         # per person: {iso: {'dist','title'}} current week
-    cur_day_actual = []      # per person: {iso: actual_units} current week
+    fs_day_maps = []         # per person: {iso: {'dist','title'}} FULL range
+    day_actual_maps = []     # per person: {iso: actual_units} current + past days
     cur_actual_total = []    # per person: this week's actual total (units)
     past_actual_maps = []    # per person: {monday_iso: actual_units}
     for p in people:
@@ -496,14 +510,20 @@ def build_payload(cfg, units, tzname):
             total = to_units(sum(day_actual_m.values()), units)
             for pmon in past_mondays:
                 try:
-                    m = garmin_week_meters(g, pmon, pmon + dt.timedelta(days=6))
-                    past_actual[pmon.date().isoformat()] = to_units(m, units)
+                    # per-day meters -> weekly total (sum) AND per-day actuals so
+                    # past-week workouts can show what was actually run.
+                    dm = garmin_day_meters(
+                        g, pmon, pmon + dt.timedelta(days=6))
+                    past_actual[pmon.date().isoformat()] = to_units(
+                        sum(dm.values()), units)
+                    for k, v in dm.items():
+                        day_actual[k] = to_units(v, units)
                 except Exception as e:
                     print("WARN: Garmin past week for %s failed: %s" % (name, e),
                           file=sys.stderr)
         except Exception as e:
             print("WARN: Garmin for %s failed: %s" % (name, e), file=sys.stderr)
-        cur_day_actual.append(day_actual)
+        day_actual_maps.append(day_actual)
         cur_actual_total.append(total)
         past_actual_maps.append(past_actual)
 
@@ -532,22 +552,26 @@ def build_payload(cfg, units, tzname):
         past.append({"start": iso, "planned": planned_row(iso),
                      "actual": actual_row})
 
-    # ---- per-day detail for the CURRENT week (Mon..Sun) ----
+    # ---- per-day plan calendar for EVERY week (oldest past -> future) ----
+    # This is a flat, date-ordered list so the badge can step through workouts
+    # across week boundaries (past and upcoming), not just the current week.
     days = []
-    for k in range(7):
-        d = base_monday + dt.timedelta(days=k)
-        iso = d.date().isoformat()
-        workouts = []
-        for pi in range(len(people)):
-            fd = fs_day_maps[pi].get(iso) or {}
-            dist = round(float(fd.get("dist", 0.0) or 0.0), 1)
-            done = cur_day_actual[pi].get(iso)
-            workouts.append({
-                "dist": dist,
-                "title": fd.get("title", "") or "",
-                "done": round(float(done), 1) if done is not None else None,
-            })
-        days.append({"date": iso, "dow": _DOW[d.weekday()], "workouts": workouts})
+    for mon in all_mondays:
+        for k in range(7):
+            d = mon + dt.timedelta(days=k)
+            iso = d.date().isoformat()
+            workouts = []
+            for pi in range(len(people)):
+                fd = fs_day_maps[pi].get(iso) or {}
+                dist = round(float(fd.get("dist", 0.0) or 0.0), 1)
+                done = day_actual_maps[pi].get(iso)
+                workouts.append({
+                    "dist": dist,
+                    "title": fd.get("title", "") or "",
+                    "done": round(float(done), 1) if done is not None else None,
+                })
+            days.append({"date": iso, "dow": _DOW[d.weekday()],
+                         "workouts": workouts})
 
     # Legacy current-week people list so an un-updated badge app still renders.
     legacy_people = []

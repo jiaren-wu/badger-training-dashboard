@@ -11,6 +11,18 @@ except Exception:
 
 from badgeware import io, brushes, shapes, screen, PixelFont, run
 
+# Battery status is exposed as module-level badgeware functions
+# (get_battery_level -> 0..100, is_charging -> bool). Import defensively so the
+# app still runs on any firmware/simulator that doesn't provide them.
+try:
+    from badgeware import get_battery_level as _get_battery_level
+except Exception:
+    _get_battery_level = None
+try:
+    from badgeware import is_charging as _is_charging
+except Exception:
+    _is_charging = None
+
 # `network` / MicroPython urlopen only exist on the badge. Guard them so the
 # app also imports (and shows demo data) under the desktop simulator.
 try:
@@ -151,6 +163,27 @@ DEMO_DASHBOARD = {
         {"start": "2025-07-28", "planned": [36.0, 43.0], "actual": [35.2, 42.1]},
     ],
     "days": [
+        {"date": "2025-07-28", "dow": "Mon", "workouts": [
+            {"dist": 5.0, "title": "Easy", "done": 5.0},
+            {"dist": 6.0, "title": "Easy", "done": 6.1}]},
+        {"date": "2025-07-29", "dow": "Tue", "workouts": [
+            {"dist": 7.0, "title": "Intervals", "done": 7.0},
+            {"dist": 8.0, "title": "Tempo", "done": 8.0}]},
+        {"date": "2025-07-30", "dow": "Wed", "workouts": [
+            {"dist": 5.0, "title": "Easy", "done": 5.0},
+            {"dist": 6.0, "title": "Easy", "done": 5.5}]},
+        {"date": "2025-07-31", "dow": "Thu", "workouts": [
+            {"dist": 0.0, "title": "Rest", "done": 0.0},
+            {"dist": 0.0, "title": "Rest", "done": 0.0}]},
+        {"date": "2025-08-01", "dow": "Fri", "workouts": [
+            {"dist": 6.0, "title": "Tempo", "done": 6.0},
+            {"dist": 7.0, "title": "Intervals", "done": 7.2}]},
+        {"date": "2025-08-02", "dow": "Sat", "workouts": [
+            {"dist": 4.0, "title": "Easy", "done": 4.0},
+            {"dist": 5.0, "title": "Easy", "done": 5.0}]},
+        {"date": "2025-08-03", "dow": "Sun", "workouts": [
+            {"dist": 12.0, "title": "Long Run", "done": 12.0},
+            {"dist": 14.0, "title": "Long Run", "done": 13.8}]},
         {"date": "2025-08-04", "dow": "Mon", "workouts": [
             {"dist": 6.0, "title": "Easy", "done": 6.0},
             {"dist": 0.0, "title": "Rest", "done": 0.0}]},
@@ -172,6 +205,27 @@ DEMO_DASHBOARD = {
         {"date": "2025-08-10", "dow": "Sun", "workouts": [
             {"dist": 16.0, "title": "Long Run", "done": None},
             {"dist": 0.0, "title": "Rest", "done": None}]},
+        {"date": "2025-08-11", "dow": "Mon", "workouts": [
+            {"dist": 6.0, "title": "Easy", "done": None},
+            {"dist": 7.0, "title": "Easy", "done": None}]},
+        {"date": "2025-08-12", "dow": "Tue", "workouts": [
+            {"dist": 8.0, "title": "Intervals", "done": None},
+            {"dist": 10.0, "title": "Tempo", "done": None}]},
+        {"date": "2025-08-13", "dow": "Wed", "workouts": [
+            {"dist": 5.0, "title": "Recovery", "done": None},
+            {"dist": 6.0, "title": "Easy", "done": None}]},
+        {"date": "2025-08-14", "dow": "Thu", "workouts": [
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 12.0, "title": "Long Intervals", "done": None}]},
+        {"date": "2025-08-15", "dow": "Fri", "workouts": [
+            {"dist": 10.0, "title": "Tempo", "done": None},
+            {"dist": 6.0, "title": "Easy", "done": None}]},
+        {"date": "2025-08-16", "dow": "Sat", "workouts": [
+            {"dist": 5.0, "title": "Easy", "done": None},
+            {"dist": 6.0, "title": "Easy", "done": None}]},
+        {"date": "2025-08-17", "dow": "Sun", "workouts": [
+            {"dist": 17.0, "title": "Long Run", "done": None},
+            {"dist": 18.0, "title": "Long Run", "done": None}]},
     ],
     "people": [
         {"name": "Ruby", "planned": 35.0, "actual": 23.6},
@@ -680,69 +734,89 @@ def pct_brush(p):
     return red
 
 
-def battery_pct():
-    """Best-effort battery percentage (0-100), or None when unavailable.
-
-    badgeware's `io` battery API is undocumented (io.md lists it as TODO), so we
-    probe the common attribute names and normalize whatever we get: a 0-1
-    fraction, a 0-100 percent, or a raw LiPo cell voltage.  Returns None if no
-    reading is exposed, in which case the footer simply omits the battery.
-    """
+def battery_level():
+    """Battery charge as 0-100 int, or None when the firmware doesn't expose it."""
+    if _get_battery_level is None:
+        return None
     try:
-        for name in ("battery", "battery_level", "battery_percent",
-                     "battery_percentage", "bat", "charge"):
-            if not hasattr(io, name):
-                continue
-            v = getattr(io, name)
-            if callable(v):
-                try:
-                    v = v()
-                except Exception:
-                    continue
-            if isinstance(v, bool) or not isinstance(v, (int, float)):
-                got = None
-                for f in ("percent", "percentage", "level", "value", "voltage"):
-                    if hasattr(v, f):
-                        vv = getattr(v, f)
-                        if callable(vv):
-                            try:
-                                vv = vv()
-                            except Exception:
-                                continue
-                        if isinstance(vv, (int, float)) and not isinstance(vv, bool):
-                            got = float(vv)
-                            break
-                if got is None:
-                    continue
-                v = got
-            v = float(v)
-            if 0.0 <= v <= 1.0:
-                pct = v * 100.0
-            elif 2.5 <= v <= 4.5:            # looks like a LiPo cell voltage
-                pct = (v - 3.3) / (4.2 - 3.3) * 100.0
-            elif 1.0 < v <= 100.0:
-                pct = v
-            else:
-                continue
-            return max(0, min(100, int(round(pct))))
+        v = _get_battery_level()
+        if v is None:
+            return None
+        v = float(v)
+        if 0.0 <= v <= 1.0:          # some builds report a 0-1 fraction
+            v *= 100.0
+        return max(0, min(100, int(round(v))))
     except Exception:
-        pass
-    return None
+        return None
 
 
-def footer_batt_clock():
-    """Footer-right text: battery% before the clock, e.g. "85% 07:52".
+def battery_charging():
+    """True when the badge is charging over USB, else False (best effort)."""
+    if _is_charging is None:
+        return False
+    try:
+        return bool(_is_charging())
+    except Exception:
+        return False
 
-    Either part is dropped when unknown; returns None when neither is available.
+
+# Battery is shown as a single colored dot in the footer instead of a percentage:
+#   charging -> blue, low -> red, mid -> orange, high -> green, full -> phosphor.
+def batt_state():
+    """Return 'charging'|'low'|'mid'|'high'|'full', or None when unknown."""
+    if battery_charging():
+        return "charging"
+    lvl = battery_level()
+    if lvl is None:
+        return None
+    if lvl < 20:
+        return "low"
+    if lvl < 55:
+        return "mid"
+    if lvl < 90:
+        return "high"
+    return "full"
+
+
+BATT_DOT = {
+    "charging": None,   # filled in after brushes exist (see BATT_DOT_INIT)
+    "low": None,
+    "mid": None,
+    "high": None,
+    "full": None,
+}
+BATT_DOT["charging"] = blue
+BATT_DOT["low"] = red
+BATT_DOT["mid"] = orange
+BATT_DOT["high"] = green
+BATT_DOT["full"] = phosphor
+
+
+def draw_footer_right(y, fallback=None):
+    """Draw the battery dot + local clock, right-aligned at x=152 on row `y`.
+
+    Returns the left-most x the block occupies so callers can keep other footer
+    text from colliding with it. Either element is omitted when unavailable.
     """
-    clock = night.hhmm(io.ticks) if night.has_time() else None
-    bp = battery_pct()
-    parts = []
-    if bp is not None:
-        parts.append("%d%%" % bp)
+    right = 152
+    lx = right
+    clock = night.hhmm(io.ticks) if night.has_time() else fallback
     if clock:
-        parts.append(clock)
-    return " ".join(parts) if parts else None
+        screen.font = small_font
+        screen.brush = dim
+        cw, _ = screen.measure_text(clock)
+        screen.text(clock, right - cw, y)
+        lx = right - cw
+    st = batt_state()
+    if st:
+        r = 2                       # 4px-wide dot reads cleanly on the 6px font row
+        gap = 5 if clock else 0
+        cx = lx - gap - r
+        cy = y + 3
+        screen.brush = BATT_DOT.get(st, gray)
+        screen.draw(shapes.circle(cx, cy, r))
+        lx = cx - r
+    return lx
 
 
 def draw_progress(x, y, w, h, pct):
@@ -937,16 +1011,19 @@ def dashboard_past():
 
 
 def today_index():
-    """Index 0..6 of today within the current week, or None if unknown."""
-    _, weeks = dashboard_weeks()
-    if not weeks:
+    """Index of today within the (multi-week) days list, or None if not present.
+
+    The days list now spans past + current + upcoming weeks, so we locate today
+    by matching its date rather than assuming it sits in the first seven entries.
+    """
+    days = dashboard_days()
+    ti = _today()
+    if not days or not ti:
         return None
-    a = _iso_days(weeks[0].get("start") or "")
-    b = _iso_days(_today() or "")
-    if a is None or b is None:
-        return None
-    off = b - a
-    return 0 if off < 0 else (6 if off > 6 else off)
+    for i in range(len(days)):
+        if days[i].get("date") == ti:
+            return i
+    return None
 
 
 def past_pages():
@@ -1019,6 +1096,30 @@ def prev_from_today():
     if ti is None:
         ti = 0
     return prev_wk_idx(ti)
+
+
+def jump_week(cur, direction):
+    """Move ~one week (7 day-entries) forward/back in the flat days list.
+
+    Lands on a day that has a workout when possible so UP/DOWN in the workout
+    view flips between weeks quickly instead of stepping day by day.
+    """
+    days = dashboard_days()
+    n = len(days)
+    if n == 0:
+        return cur
+    target = cur + 7 * direction
+    if target < 0:
+        target = 0
+    elif target > n - 1:
+        target = n - 1
+    if _has_wk(target):
+        return target
+    for off in range(1, 8):        # snap outward to the nearest real workout
+        for t in (target + off, target - off):
+            if 0 <= t < n and _has_wk(t):
+                return t
+    return target
 
 
 def btn(name):
@@ -1124,15 +1225,9 @@ def draw():
 
     # ---- footer ----
     screen.font = small_font
-    # footer-right first: battery% before the local clock (or the refresh hint
-    # until the clock syncs).  Drawn first so the nav hint can dodge its edge.
-    clock = night.hhmm(io.ticks) if night.has_time() else "B refresh"
-    bp = battery_pct()
-    footer_r = (("%d%% " % bp) + clock) if bp is not None else clock
-    screen.brush = dim
-    rw, _ = screen.measure_text(footer_r)
-    rx = 152 - rw
-    screen.text(footer_r, rx, 110)
+    # footer-right first: battery dot + local clock (or the refresh hint until
+    # the clock syncs).  Drawn first so the status text can dodge its left edge.
+    rx = draw_footer_right(110, fallback="B refresh")
     if loading:
         screen.brush = blue
         screen.text("Updating...", 8, 110)
@@ -1144,10 +1239,10 @@ def draw():
         else:
             screen.brush = orange
         screen.text(status, 8, 110)
-        # teach the newest key: C reveals today's/next workout when we have real
-        # plan detail; otherwise hint that upcoming weeks exist via DOWN.  Only
-        # draw the hint when it fits without colliding with the right block.
-        hint = "C plan" if has_any_workout() else ("v wks" if max_page() > 0 else "")
+        # C drills into the plan (today's/this-or-next week's workouts).  We no
+        # longer hint UP/DOWN here so the status can't collide with it; only show
+        # "C plan" and only when it fits left of the clock block.
+        hint = "C plan" if has_any_workout() else ""
         if hint:
             sw, _ = screen.measure_text(status)
             hx = 8 + sw + 6
@@ -1213,14 +1308,13 @@ def draw_lookahead(p):
             screen.text(txt, COL_R[i] - w, ry)
         ry += 15
 
-    # ---- footer: nav hint + clock ----
+    # ---- footer: nav hint + battery/clock ----
     screen.font = small_font
+    rx = draw_footer_right(110)
     screen.brush = dim
-    screen.text("UP/DN weeks", 8, 110)
-    footer_r = footer_batt_clock()
-    if footer_r:
-        hw, _ = screen.measure_text(footer_r)
-        screen.text(footer_r, 152 - hw, 110)
+    hint = "UP/DN wks"
+    if 8 + screen.measure_text(hint)[0] <= rx - 6:
+        screen.text(hint, 8, 110)
 
 
 # ---------------------------------------------------------------------------
@@ -1288,12 +1382,11 @@ def draw_pastweeks(p):
 
     # ---- footer ----
     screen.font = small_font
+    rx = draw_footer_right(110)
     screen.brush = dim
-    screen.text("UP/DN weeks", 8, 110)
-    footer_r = footer_batt_clock()
-    if footer_r:
-        hw, _ = screen.measure_text(footer_r)
-        screen.text(footer_r, 152 - hw, 110)
+    hint = "UP/DN wks"
+    if 8 + screen.measure_text(hint)[0] <= rx - 6:
+        screen.text(hint, 8, 110)
 
 
 # ---------------------------------------------------------------------------
@@ -1367,12 +1460,12 @@ def draw_workout(idx):
 
     # ---- footer ----
     screen.font = small_font
+    rx = draw_footer_right(110)
     screen.brush = dim
-    screen.text("A< B home C>", 8, 110)
-    footer_r = footer_batt_clock()
-    if footer_r:
-        hw, _ = screen.measure_text(footer_r)
-        screen.text(footer_r, 152 - hw, 110)
+    # A/C step days (across week boundaries); UP/DOWN jump a whole week; B home.
+    legend = "A/C day  ^v wk"
+    if 8 + screen.measure_text(legend)[0] <= rx - 6:
+        screen.text(legend, 8, 110)
 # ---------------------------------------------------------------------------
 started = False
 
@@ -1401,11 +1494,17 @@ def _update_impl():
     #   B     = home (current week); refresh when already home
     try:
         if btn("BUTTON_DOWN"):
-            view = "week"
-            page = min(page + 1, max_page())
+            if view == "workout":
+                wk_idx = jump_week(wk_idx, +1)   # next week's workout
+            else:
+                view = "week"
+                page = min(page + 1, max_page())
         elif btn("BUTTON_UP"):
-            view = "week"
-            page = max(page - 1, min_page())
+            if view == "workout":
+                wk_idx = jump_week(wk_idx, -1)   # previous week's workout
+            else:
+                view = "week"
+                page = max(page - 1, min_page())
         elif btn("BUTTON_C") or btn("BUTTON_RIGHT"):
             if view == "workout":
                 nxt = next_wk_idx(wk_idx)
