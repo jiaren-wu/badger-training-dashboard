@@ -81,6 +81,7 @@ DASHBOARD_URL = None          # optional: URL returning dashboard.json
 WEATHER_LOCATION = None       # optional: same formats as the weather app
 DIST_UNITS = "mi"             # "mi" or "km"
 WIFI_TIMEOUT = 60             # seconds to wait for association before giving up
+WIFI_RECONNECT_MS = 12 * 1000 # re-issue connect() this often within the window
 # Power saving: when True, the WiFi radio is powered down (disconnect +
 # active(False)) between refreshes and only brought up for each fetch. This
 # saves battery, BUT on this badge's WiFi chip a cold radio start can drop the
@@ -115,6 +116,7 @@ location_detected = False
 wlan = None
 connected = False
 ticks_start = None
+_wifi_connect_ts = None       # io.ticks when we last issued wlan.connect()
 config_loaded = False
 
 weather = None                # {'temp','code','condition'}
@@ -390,7 +392,7 @@ def load_config():
 # WiFi (non-blocking: polled across frames)
 # ---------------------------------------------------------------------------
 def wlan_start():
-    global wlan, ticks_start, connected
+    global wlan, ticks_start, connected, _wifi_connect_ts
     if network is None or not WIFI_SSID:
         return False
     if wlan is None:
@@ -406,16 +408,26 @@ def wlan_start():
         ticks_start = None
         return True
     connected = False
+    now = io.ticks
     # Begin (or re-arm) an association attempt with a fresh timeout window.
     # ticks_start is reset to None at the start of every refresh cycle and after
     # each failure, so a dropped/again-in-range network is retried cleanly
     # instead of getting stuck on "WiFi failed" until a manual reboot.
     if ticks_start is None:
-        ticks_start = io.ticks
+        ticks_start = now
+        _wifi_connect_ts = None       # force an immediate connect() below
         try:
             wlan.disconnect()
         except Exception:
             pass
+    # Issue connect() when the window opens, and RE-ISSUE it periodically if we
+    # still haven't associated. A single connect() can be silently dropped (a
+    # weak first beacon, a busy AP, or a not-quite-ready radio), which used to
+    # leave the badge idle until the full 60s timeout and then show "WiFi
+    # failed"; re-issuing every WIFI_RECONNECT_MS self-heals that within the
+    # same window instead of waiting the whole minute.
+    if _wifi_connect_ts is None or now - _wifi_connect_ts > WIFI_RECONNECT_MS:
+        _wifi_connect_ts = now
         try:
             wlan.connect(WIFI_SSID, WIFI_PASSWORD)
             print("Connecting to WiFi...")
@@ -425,7 +437,7 @@ def wlan_start():
         connected = True
         ticks_start = None
         return True
-    if io.ticks - ticks_start > WIFI_TIMEOUT * 1000:
+    if now - ticks_start > WIFI_TIMEOUT * 1000:
         ticks_start = None      # re-arm for a clean retry on the next cycle
         return False
     return None  # still trying
@@ -439,9 +451,10 @@ def wlan_stop():
     the association is torn down and rebuilt each cycle instead of being held
     open 24/7. No-op / harmless under the simulator (network is None).
     """
-    global connected, ticks_start, wlan
+    global connected, ticks_start, wlan, _wifi_connect_ts
     connected = False
     ticks_start = None
+    _wifi_connect_ts = None
     if wlan is None:
         return
     try:
