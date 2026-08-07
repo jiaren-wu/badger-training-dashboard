@@ -721,6 +721,20 @@ def precip_label(code):
     return "Rain"
 
 
+def condition_brush(code):
+    """A weather-mood colour for the top line, so the city name reflects the
+    sky at a glance instead of a flat grey."""
+    if code in (0, 1):                                  # clear / mainly clear
+        return yellow
+    if code in (71, 73, 75, 77, 85, 86, 56, 57, 66, 67):  # snow / ice
+        return cyan
+    if code in (95, 96, 99):                            # storm / hail
+        return orange
+    if code in (2, 3, 45, 48):                          # cloudy / overcast / fog
+        return white
+    return blue                                         # rain / drizzle / showers
+
+
 # ---------------------------------------------------------------------------
 # Running dashboard
 # ---------------------------------------------------------------------------
@@ -1463,14 +1477,14 @@ def draw():
         screen.text(tmp, 8, 3)
         tw, _ = screen.measure_text(tmp)
         cx = 8 + tw + 6
-        # City (geolocated, e.g. "Seattle"/"Shoreline") right-aligned on the
-        # same line; the AQI row below no longer repeats it.
+        # City (geolocated, e.g. "Seattle"/"Shoreline") right-aligned, tinted by
+        # the current weather so it reads as info rather than a greyed-out label.
         city_x = 152
         if location_detected:
             city = LOCATION_NAME
             if len(city) > 12:
                 city = city[:12]
-            screen.brush = gray
+            screen.brush = condition_brush(weather.get("code"))
             cw, _ = screen.measure_text(city)
             city_x = 152 - cw
             screen.text(city, city_x, 3)
