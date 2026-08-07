@@ -5,8 +5,8 @@
 # press) self-heals right back into training instead of the launcher.
 #
 # Escape hatch: hold any face button (A / B / C / UP / DOWN) at power-on to
-# reach the normal app menu. If runlog is missing or fails to import, we also
-# fall back to the menu automatically (never a reset loop).
+# reach the normal app menu. If the live runlog build fails to import, we fall
+# back to the known-good stable build, then to the menu -- never a reset loop.
 #
 # To fully restore stock behaviour, copy main.py.orig back over this file in
 # disk mode.
@@ -19,6 +19,7 @@ import gc
 import powman
 
 AUTO_APP = "/system/apps/runlog"
+STABLE_APP = "/system/apps/runlog_stable"
 
 running_app = None
 
@@ -80,17 +81,19 @@ def run_menu():
     return chosen
 
 
-# Decide what to launch: training by default, menu on request/fallback.
-if _boot_escape() or not _exists(AUTO_APP):
-    app = run_menu()
+# Decide what to launch: training by default, menu on explicit request.
+if _boot_escape():
+    chosen = run_menu()
+    candidates = [chosen] if (isinstance(chosen, str) and _exists(chosen)) else [AUTO_APP]
 else:
-    app = AUTO_APP
+    # Auto-boot the training dashboard. Try the live build first; if it fails
+    # to import/init (corrupt copy, compile-time MemoryError, brush/pen limit,
+    # a bug in init()), fall back to the known-good stable build so the badge
+    # still comes up as a working dashboard. Only if BOTH fail do we drop to
+    # the launcher menu -- never a blank REPL.
+    candidates = [AUTO_APP, STABLE_APP]
 
-# Guard against a bad menu return so we never brick the boot.
-if not (isinstance(app, str) and _exists(app)):
-    app = AUTO_APP
-
-# Don't pass the button press into the app
+# Don't pass the button press into the app.
 while io.held:
     io.poll()
 
@@ -98,14 +101,62 @@ machine.Pin.board.BUTTON_HOME.irq(
     trigger=machine.Pin.IRQ_FALLING, handler=quit_to_launcher
 )
 
-sys.path.insert(0, app)
-os.chdir(app)
+# Reclaim and de-fragment the heap before the big (~90 KB) app import. Boot-time
+# free memory is razor-thin; a fresh collect gives the app the best chance to
+# fit. The printed value shows up on the serial console for diagnostics.
+gc.collect()
+try:
+    print("boot: free heap =", gc.mem_free(),
+          "mpy =", getattr(sys.implementation, "_mpy", "?"),
+          "ver =", sys.implementation.version)
+except Exception:
+    pass
 
-running_app = __import__(app)
+booted = False
+launched = False
+for candidate in candidates:
+    if not _exists(candidate):
+        continue
+    pre_mods = set(sys.modules.keys())
+    try:
+        sys.path.insert(0, candidate)
+        os.chdir(candidate)
+        running_app = __import__(candidate)
+        getattr(running_app, "init", lambda: None)()
+        launched = True
+        run(running_app.update)  # blocks until the app exits or crashes
+        booted = True
+        break
+    except Exception as e:
+        try:
+            print("boot: app failed:", candidate, "->", e)
+            sys.print_exception(e)
+        except Exception:
+            pass
+        gc.collect()
+        if launched:
+            # Import + init succeeded but the running app crashed at runtime.
+            # Don't swap in a different build mid-stream; fall through to menu.
+            break
+        # Import/init failed: roll back sys.path / modules / cwd so the next
+        # candidate (or the menu) imports from a clean state.
+        try:
+            if sys.path and sys.path[0] == candidate:
+                sys.path.pop(0)
+            for _m in list(sys.modules.keys()):
+                if _m not in pre_mods:
+                    del sys.modules[_m]
+            os.chdir("/")
+        except Exception:
+            pass
+        running_app = None
+        continue
 
-getattr(running_app, "init", lambda: None)()
+if not booted:
+    try:
+        run_menu()
+    except Exception:
+        pass
 
-run(running_app.update)
-
-# If the app ever returns (HOME) or crashes, reset -> auto-launch training.
+# If we get here, reset -> firmware auto-launches training again.
 machine.reset()

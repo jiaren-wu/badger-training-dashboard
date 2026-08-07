@@ -53,7 +53,16 @@ from nightmode import NightMode
 # Fonts
 # ---------------------------------------------------------------------------
 small_font = PixelFont.load("/system/assets/fonts/ark.ppf")
-large_font = PixelFont.load("/system/assets/fonts/absolute.ppf")
+# The large font (absolute.ppf, ~9 KB) is deliberately NOT loaded. The
+# per-person redesign renders every label with small_font, so the large font
+# became pure dead weight. Worse, it was actively harmful on this memory-tight
+# badge: its ~9 KB contiguous allocation is what fragmented the boot heap and
+# dropped the badge to a blank REPL (MemoryError at boot), and once running it
+# stole the heap the TLS fetch needs -- surfacing as a connected-but-
+# "Offline - retry" dashboard (ENOMEM on every fetch). Not loading it frees
+# ~9 KB for the network fetch and removes the boot crash entirely. Alias the
+# name to small_font so any stray reference still resolves.
+large_font = small_font
 
 # ---------------------------------------------------------------------------
 # Palette (GitHub dark)
@@ -78,6 +87,11 @@ cyan = brushes.color(56, 232, 225)
 green_dim = brushes.color(33, 110, 57)
 green_mid = brushes.color(46, 160, 84)
 red_dim = brushes.color(120, 52, 50)    # a "missed planned day" without shouting
+# Per-runner identity accents for the progress charts (panel/row labels + B's
+# two actual lines): Ruby = rose, Jiaren = blue (already defined above). Kept
+# distinct from the status palette (green/orange/red/purple) so a name colour
+# never reads as an adherence signal.
+rose = brushes.color(244, 114, 182)
 
 # ---------------------------------------------------------------------------
 # Config (populated from /secrets.py)
@@ -831,13 +845,13 @@ def step_refresh():
                 fetch_weather()
                 weather_live = True
             except Exception as e:
-                print("weather error:", e)
+                print("weather error:", e, "free=", gc.mem_free())
     elif step == "aqi":
         if connected:
             try:
                 fetch_aqi()
             except Exception as e:
-                print("aqi error:", e)
+                print("aqi error:", e, "free=", gc.mem_free())
     elif step == "dashboard":
         if connected:
             # The dashboard is the largest payload (~18KB), so a single TLS read
@@ -847,11 +861,16 @@ def step_refresh():
             for attempt in range(2):
                 try:
                     gc.collect()  # free heap before the TLS handshake
+                    print("pre-fetch free =", gc.mem_free())
                     if fetch_dashboard():
                         running_live = True
+                        try:
+                            print("dashboard OK, free heap =", gc.mem_free())
+                        except Exception:
+                            pass
                         break
                 except Exception as e:
-                    print("dashboard error:", e)
+                    print("dashboard error:", e, "free=", gc.mem_free())
                     gc.collect()
     elif step == "finish":
         if weather is None:
@@ -1858,7 +1877,7 @@ def _chart_series():
         if p is None:
             p = max(pl) if pl else 0.0
         seq.append({"start": wk.get("start", ""), "p": float(p or 0),
-                    "a": (ac[0] + ac[1]) / 2.0, "ac": ac})
+                    "pc": pl, "a": (ac[0] + ac[1]) / 2.0, "ac": ac})
     return seq, len(past)
 
 
@@ -1910,45 +1929,47 @@ def _now_marker(x, y, h):
     screen.draw(shapes.rectangle(x, y, 1, h))
 
 
-# --- A: weekly planned bars with an actual overlay --------------------------
+# --- A: weekly bars, split top (Ruby) / bottom (Jiaren), actual over plan ----
 def _chart_bars(seq, now_idx, units):
-    PX, PY, PW, PH = 10, 22, 140, 64
     n = len(seq)
     maxv = 1.0
     for w in seq:
-        maxv = max(maxv, w["p"], w["a"])
+        maxv = max(maxv, w["pc"][0], w["pc"][1], w["ac"][0], w["ac"][1])
+    PX, PW = 10, 140
     slot = PW / float(n)
     bw = int(slot) - 1
     if bw < 2:
         bw = 2
-    y0 = PY + PH
-    for i in range(n):
-        w = seq[i]
-        x = int(PX + i * slot)
-        ph = int(w["p"] / maxv * PH)
-        if ph > 0:
-            screen.brush = track
-            screen.draw(shapes.rectangle(x, y0 - ph, bw, ph))
-        if i <= now_idx and w["a"] > 0:
-            ah = int(min(w["a"], maxv) / maxv * PH)
-            ratio = (w["a"] / w["p"] * 100.0) if w["p"] > 0 else 100.0
-            screen.brush = pct_brush(ratio)
-            screen.draw(shapes.rectangle(x, y0 - ah, bw, ah))
-    _now_marker(int(PX + (now_idx + 0.5) * slot), PY, PH)
-    screen.font = small_font
-    screen.brush = gray
-    screen.text("Wk %d/%d  peak %d%s" % (min(now_idx + 1, n), n,
-                int(round(maxv)), units), 8, y0 + 4)
+    PH = 30
+    panels = (("Ruby", 0, 18, rose), ("Jiaren", 1, 62, blue))
+    for lbl, k, ty, idc in panels:
+        screen.font = small_font
+        screen.brush = idc
+        screen.text(lbl, 8, ty)
+        y0 = ty + 9 + PH
+        for i in range(n):
+            w = seq[i]
+            x = int(PX + i * slot)
+            ph = int(w["pc"][k] / maxv * PH)
+            if ph > 0:
+                screen.brush = track
+                screen.draw(shapes.rectangle(x, y0 - ph, bw, ph))
+            if i <= now_idx and w["ac"][k] > 0:
+                ah = int(min(w["ac"][k], maxv) / maxv * PH)
+                ratio = (w["ac"][k] / w["pc"][k] * 100.0) if w["pc"][k] > 0 else 100.0
+                screen.brush = pct_brush(ratio)
+                screen.draw(shapes.rectangle(x, y0 - ah, bw, ah))
+        _now_marker(int(PX + (now_idx + 0.5) * slot), ty + 9, PH)
 
 
-# --- B: planned vs actual line chart ----------------------------------------
+# --- B: plan line + one actual line per runner (Ruby + Jiaren) --------------
 def _chart_lines(seq, now_idx, units):
-    PX, PY, PW, PH = 10, 22, 140, 64
+    PX, PY, PW, PH = 10, 20, 140, 60
     n = len(seq)
     den = max(n - 1, 1)
     maxv = 1.0
     for w in seq:
-        maxv = max(maxv, w["p"], w["a"])
+        maxv = max(maxv, w["p"], w["ac"][0], w["ac"][1])
 
     def X(i):
         return int(PX + i * PW / float(den))
@@ -1956,88 +1977,109 @@ def _chart_lines(seq, now_idx, units):
     def Y(v):
         return int(PY + PH - (min(v, maxv) / maxv * PH))
 
+    # shared plan reference (gray)
     screen.brush = gray
     for i in range(n - 1):
         screen.draw(shapes.line(X(i), Y(seq[i]["p"]), X(i + 1), Y(seq[i + 1]["p"]), 1))
     last = min(now_idx, n - 1)
-    screen.brush = phosphor
+    # Ruby actual
+    screen.brush = rose
     for i in range(last):
-        screen.draw(shapes.line(X(i), Y(seq[i]["a"]), X(i + 1), Y(seq[i + 1]["a"]), 2))
+        screen.draw(shapes.line(X(i), Y(seq[i]["ac"][0]),
+                    X(i + 1), Y(seq[i + 1]["ac"][0]), 2))
+    # Jiaren actual
+    screen.brush = blue
+    for i in range(last):
+        screen.draw(shapes.line(X(i), Y(seq[i]["ac"][1]),
+                    X(i + 1), Y(seq[i + 1]["ac"][1]), 2))
     _now_marker(X(last), PY, PH)
     screen.font = small_font
+    ly = PY + PH + 4
     screen.brush = gray
-    screen.text("plan", 8, PY + PH + 4)
-    screen.brush = phosphor
-    screen.text("actual", 40, PY + PH + 4)
+    screen.text("plan", 8, ly)
+    screen.brush = rose
+    screen.text("Ruby", 40, ly)
+    screen.brush = blue
+    screen.text("Jiaren", 76, ly)
 
 
-# --- C: cumulative planned vs actual (ahead / behind) -----------------------
+# --- C: cumulative actual vs plan, split top (Ruby) / bottom (Jiaren) --------
 def _chart_cumulative(seq, now_idx, units):
-    PX, PY, PW, PH = 10, 22, 140, 60
     n = len(seq)
+    PX, PW = 10, 140
     slot = PW / float(n)
-    pcum = []
-    tot = 0.0
-    for w in seq:
-        tot += w["p"]
-        pcum.append(tot)
-    maxc = max(tot, 1.0)
-    y0 = PY + PH
-    acum = 0.0
-    for i in range(n):
-        if i <= now_idx:
-            acum += seq[i]["a"]
-            h = int(min(acum, maxc) / maxc * PH)
-            if h > 0:
-                screen.brush = green_mid
-                screen.draw(shapes.rectangle(int(PX + i * slot), y0 - h,
-                            int(slot) + 1, h))
-    screen.brush = gray
-    for i in range(n - 1):
-        x1 = int(PX + (i + 0.5) * slot)
-        x2 = int(PX + (i + 1.5) * slot)
-        screen.draw(shapes.line(x1, int(y0 - pcum[i] / maxc * PH),
-                    x2, int(y0 - pcum[i + 1] / maxc * PH), 1))
-    _now_marker(int(PX + (now_idx + 0.5) * slot), PY, PH)
-    pd, ad = _done_totals(seq, now_idx)
-    delta = ad - pd
-    screen.font = small_font
-    screen.brush = white
-    screen.text("%d/%d %s" % (int(round(ad)), int(round(tot)), units), 8, y0 + 4)
-    if delta >= 0:
-        screen.brush = green
-        screen.text("+%d ahead" % int(round(delta)), 80, y0 + 4)
-    else:
-        screen.brush = orange
-        screen.text("%d behind" % int(round(delta)), 80, y0 + 4)
+    PH = 26
+    panels = (("Ruby", 0, 16, rose), ("Jiaren", 1, 55, blue))
+    for lbl, k, ty, idc in panels:
+        pcum = []
+        tot = 0.0
+        for w in seq:
+            tot += w["pc"][k]
+            pcum.append(tot)
+        maxc = max(tot, 1.0)
+        yb = ty + 10 + PH
+        acum = 0.0
+        for i in range(n):
+            if i <= now_idx:
+                acum += seq[i]["ac"][k]
+                h = int(min(acum, maxc) / maxc * PH)
+                if h > 0:
+                    screen.brush = green_mid
+                    screen.draw(shapes.rectangle(int(PX + i * slot), yb - h,
+                                int(slot) + 1, h))
+        screen.brush = gray
+        for i in range(n - 1):
+            x1 = int(PX + (i + 0.5) * slot)
+            x2 = int(PX + (i + 1.5) * slot)
+            screen.draw(shapes.line(x1, int(yb - pcum[i] / maxc * PH),
+                        x2, int(yb - pcum[i + 1] / maxc * PH), 1))
+        _now_marker(int(PX + (now_idx + 0.5) * slot), ty + 10, PH)
+        pd = ad = 0.0
+        for i in range(min(now_idx, n)):
+            pd += seq[i]["pc"][k]
+            ad += seq[i]["ac"][k]
+        delta = ad - pd
+        screen.font = small_font
+        screen.brush = idc
+        screen.text(lbl, 8, ty)
+        lw, _ = screen.measure_text(lbl)
+        if delta >= 0:
+            screen.brush = green
+            screen.text("+%d ahead" % int(round(delta)), 8 + lw + 6, ty)
+        else:
+            screen.brush = orange
+            screen.text("%d behind" % int(round(delta)), 8 + lw + 6, ty)
 
 
-# --- D: progress ring (adherence over completed weeks) ----------------------
+# --- D: two adherence rings, one per runner (Ruby + Jiaren) -----------------
 def _chart_ring(seq, now_idx, units):
-    pd, ad = _done_totals(seq, now_idx)
-    adh = (ad / pd) if pd > 0 else 0.0
-    cx, cy, r, thick = 42, 60, 30, 9
-    _ring(cx, cy, r, thick, adh, pct_brush(adh * 100.0))
-    screen.font = large_font
-    screen.brush = white
-    pctxt = "%d%%" % int(round(adh * 100.0))
-    tw, th = screen.measure_text(pctxt)
-    screen.text(pctxt, cx - tw // 2, cy - th // 2)
     n = len(seq)
-    sx = 88
+    specs = ((0, "Ruby", 42, rose), (1, "Jiaren", 110, blue))
+    cy, r, thick = 50, 25, 8
+    for k, lbl, cx, idc in specs:
+        pd = ad = 0.0
+        for i in range(min(now_idx, n)):
+            pd += seq[i]["pc"][k]
+            ad += seq[i]["ac"][k]
+        adh = (ad / pd) if pd > 0 else 0.0
+        _ring(cx, cy, r, thick, adh, pct_brush(adh * 100.0))
+        screen.font = small_font
+        pctxt = "%d%%" % int(round(adh * 100.0))
+        tw, th = screen.measure_text(pctxt)
+        screen.brush = white
+        screen.text(pctxt, cx - tw // 2, cy - th // 2)
+        screen.brush = idc
+        lw, _ = screen.measure_text(lbl)
+        screen.text(lbl, cx - lw // 2, cy + r + 3)
+        screen.brush = gray
+        sub = "%d/%d %s" % (int(round(ad)), int(round(pd)), units)
+        sw, _ = screen.measure_text(sub)
+        screen.text(sub, cx - sw // 2, cy + r + 13)
     screen.font = small_font
     screen.brush = phosphor
-    screen.text("Week", sx, 26)
-    screen.brush = white
-    screen.text("%d / %d" % (min(now_idx + 1, n), n), sx, 36)
-    screen.brush = phosphor
-    screen.text("Banked", sx, 52)
-    screen.brush = white
-    screen.text("%d %s" % (int(round(ad)), units), sx, 62)
-    screen.brush = phosphor
-    screen.text("Planned", sx, 78)
-    screen.brush = white
-    screen.text("%d %s" % (int(round(pd)), units), sx, 88)
+    t = "Week %d/%d" % (min(now_idx + 1, n), n)
+    tw, _ = screen.measure_text(t)
+    screen.text(t, 80 - tw // 2, 16)
 
 
 # --- E: per-week heat strip, one row per runner -----------------------------
@@ -2048,11 +2090,11 @@ def _chart_heat(seq, now_idx, units):
     pitch = 8
     if x0 + n * pitch > 152:
         pitch = max(4, (152 - x0) // max(n, 1))
-    rows = (("R", 30), ("J", 46))
+    rows = (("R", 30, rose), ("J", 46, blue))
     for k in range(2):
-        lbl, ry = rows[k]
+        lbl, ry, idc = rows[k]
         screen.font = small_font
-        screen.brush = phosphor
+        screen.brush = idc
         screen.text(lbl, 8, ry)
         for i in range(n):
             w = seq[i]
@@ -2061,7 +2103,8 @@ def _chart_heat(seq, now_idx, units):
                 screen.brush = track
             else:
                 a = w["ac"][k]
-                ratio = (a / w["p"]) if w["p"] > 0 else (1.0 if a > 0 else 0.0)
+                pk = w["pc"][k]
+                ratio = (a / pk) if pk > 0 else (1.0 if a > 0 else 0.0)
                 screen.brush = _ratio_brush(ratio)
             screen.draw(shapes.rectangle(x, ry, pitch - 1, 7))
             if i == now_idx:
@@ -2086,7 +2129,7 @@ def _chart_heat(seq, now_idx, units):
     screen.text("[]=now", 122, y)
 
 
-# --- F: GitHub-style contribution grid (one square per day) -----------------
+# --- F: GitHub-style grid, split left (Ruby) / right (Jiaren) ----------------
 def _chart_blocks(seq, now_idx, units):
     days = dashboard_days()
     if not days:
@@ -2095,28 +2138,47 @@ def _chart_blocks(seq, now_idx, units):
         screen.text("No daily data", 8, 44)
         return
     ti = _today()
-    cw = 8
-    ch = 8
-    gx = 12
-    gy = 20
-    col = 0
+    # count week-columns so both grids stay narrow enough to sit side by side
+    c = 0
     for i in range(len(days)):
-        day = days[i]
-        date = day.get("date", "")
-        row = _weekday_mon0(date)
+        row = _weekday_mon0(days[i].get("date", ""))
         if row is None:
             row = i % 7
         if i > 0 and row == 0:
-            col += 1
-        x = gx + col * cw
-        y = gy + row * ch
-        mi = 0.0
-        planned = False
-        for wo in (day.get("workouts", []) or [])[:2]:
+            c += 1
+    ncols = c + 1
+    ch = 8
+    cw = min(7, max(3, 56 // max(ncols, 1)))
+    gy = 26
+    grids = ((0, "Ruby", 14, rose), (1, "Jiaren", 92, blue))
+    # weekday initials down the far left (shared)
+    screen.font = small_font
+    screen.brush = dim
+    for r, ch2 in enumerate(("M", "T", "W", "T", "F", "S", "S")):
+        screen.text(ch2, 2, gy + r * ch)
+    for k, lbl, gx, idc in grids:
+        screen.font = small_font
+        screen.brush = idc
+        screen.text(lbl, gx, 16)
+        col = 0
+        for i in range(len(days)):
+            day = days[i]
+            date = day.get("date", "")
+            row = _weekday_mon0(date)
+            if row is None:
+                row = i % 7
+            if i > 0 and row == 0:
+                col += 1
+            x = gx + col * cw
+            y = gy + row * ch
+            wos = day.get("workouts", []) or []
+            wo = wos[k] if k < len(wos) else {}
+            mi = 0.0
+            planned = False
             d = wo.get("done")
             if d is not None:
                 try:
-                    mi = max(mi, float(d))
+                    mi = float(d)
                 except Exception:
                     pass
             try:
@@ -2124,40 +2186,36 @@ def _chart_blocks(seq, now_idx, units):
                     planned = True
             except Exception:
                 pass
-        past = (date <= ti) if ti else False
-        if mi > 0:
-            screen.brush = _mi_brush(mi)
-        elif planned and past:
-            screen.brush = red_dim
-        elif planned:
-            screen.brush = dim
-        else:
-            screen.brush = track
-        screen.draw(shapes.rectangle(x, y, cw - 1, ch - 1))
-        if ti and date == ti:
-            screen.brush = phosphor
-            screen.draw(shapes.rectangle(x - 1, y - 1, cw, ch).stroke(1))
-    # weekday initials down the left
+            past = (date <= ti) if ti else False
+            if mi > 0:
+                screen.brush = _mi_brush(mi)
+            elif planned and past:
+                screen.brush = red_dim
+            elif planned:
+                screen.brush = dim
+            else:
+                screen.brush = track
+            screen.draw(shapes.rectangle(x, y, cw - 1, ch - 1))
+            if ti and date == ti:
+                screen.brush = phosphor
+                screen.draw(shapes.rectangle(x - 1, y - 1, cw, ch).stroke(1))
+    # compact shared legend
+    ly = 92
     screen.font = small_font
-    screen.brush = dim
-    for r, ch2 in enumerate(("M", "T", "W", "T", "F", "S", "S")):
-        screen.text(ch2, 4, gy + r * ch)
-    # legend
-    ly = gy + 7 * ch + 2
     screen.brush = gray
-    screen.text("less", 12, ly)
+    screen.text("less", 2, ly)
     screen.brush = green_dim
-    screen.draw(shapes.rectangle(40, ly, 6, 6))
+    screen.draw(shapes.rectangle(26, ly, 6, 6))
     screen.brush = green_mid
-    screen.draw(shapes.rectangle(48, ly, 6, 6))
+    screen.draw(shapes.rectangle(34, ly, 6, 6))
     screen.brush = green
-    screen.draw(shapes.rectangle(56, ly, 6, 6))
+    screen.draw(shapes.rectangle(42, ly, 6, 6))
     screen.brush = gray
-    screen.text("more", 66, ly)
+    screen.text("more", 52, ly)
     screen.brush = red_dim
-    screen.draw(shapes.rectangle(96, ly, 6, 6))
+    screen.draw(shapes.rectangle(82, ly, 6, 6))
     screen.brush = gray
-    screen.text("miss", 105, ly)
+    screen.text("miss", 91, ly)
 
 
 _CHART_FUNCS = (_chart_bars, _chart_lines, _chart_cumulative,
