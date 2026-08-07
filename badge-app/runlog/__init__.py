@@ -141,96 +141,105 @@ _forced_wk = None             # simulator/testing override: workout day index
 # Multi-week shape mirrors the backend: names[i] lines up with each week's
 # planned[i]/actual[i]; weeks[0] is the current week, the rest are upcoming.
 # ---------------------------------------------------------------------------
+# Ruby and Jiaren follow the SAME Final Surge Level 1 plan, so every day's
+# planned distance + title is identical across both runners and only the Garmin
+# "done" actuals differ. The demo mirrors that shape so the offline/no-WiFi view
+# exercises the same shared-plan layout as live data (one plan column + each
+# runner's progress), not the per-person fallback.
 DEMO_DASHBOARD = {
     "week_start": "2025-08-04",
     "units": "mi",
     "today": "2025-08-06",
     "names": ["Ruby", "Jiaren"],
     "weeks": [
-        {"start": "2025-08-04", "planned": [35.0, 42.0], "actual": [23.6, 18.3]},
-        {"start": "2025-08-11", "planned": [38.0, 44.0], "actual": [0.0, 0.0]},
-        {"start": "2025-08-18", "planned": [40.0, 26.2], "actual": [0.0, 0.0]},
-        {"start": "2025-08-25", "planned": [42.0, 46.0], "actual": [0.0, 0.0]},
-        {"start": "2025-09-01", "planned": [30.0, 48.0], "actual": [0.0, 0.0]},
-        {"start": "2025-09-08", "planned": [45.0, 50.0], "actual": [0.0, 0.0]},
-        {"start": "2025-09-15", "planned": [48.0, 30.0], "actual": [0.0, 0.0]},
-        {"start": "2025-09-22", "planned": [26.2, 52.0], "actual": [0.0, 0.0]},
-        {"start": "2025-09-29", "planned": [50.0, 26.2], "actual": [0.0, 0.0]},
+        {"start": "2025-08-04", "planned": [19.0, 19.0], "actual": [9.0, 6.8]},
+        {"start": "2025-08-11", "planned": [19.0, 19.0], "actual": [0.0, 0.0]},
+        {"start": "2025-08-18", "planned": [20.0, 20.0], "actual": [0.0, 0.0]},
+        {"start": "2025-08-25", "planned": [21.0, 21.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-01", "planned": [19.0, 19.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-08", "planned": [22.0, 22.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-15", "planned": [20.0, 20.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-22", "planned": [23.0, 23.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-29", "planned": [19.0, 19.0], "actual": [0.0, 0.0]},
     ],
     "past": [
-        {"start": "2025-07-07", "planned": [32.0, 40.0], "actual": [30.1, 41.2]},
-        {"start": "2025-07-14", "planned": [34.0, 41.0], "actual": [33.0, 40.5]},
-        {"start": "2025-07-21", "planned": [35.0, 42.0], "actual": [31.8, 39.0]},
-        {"start": "2025-07-28", "planned": [36.0, 43.0], "actual": [35.2, 42.1]},
+        {"start": "2025-07-07", "planned": [18.0, 18.0], "actual": [17.5, 18.2]},
+        {"start": "2025-07-14", "planned": [19.0, 19.0], "actual": [19.0, 16.8]},
+        {"start": "2025-07-21", "planned": [20.0, 20.0], "actual": [18.4, 20.5]},
+        {"start": "2025-07-28", "planned": [19.0, 19.0], "actual": [19.0, 19.1]},
     ],
+    # One shared plan per day (Mon Solo #1, Wed Group Workout, Thu Solo #2,
+    # Sat Group Long Run; Tue/Fri/Sun rest) totalling 19 mi/week. Prev week is
+    # fully logged, the current week is logged through Wed (today), next week is
+    # still to come (done=None).
     "days": [
         {"date": "2025-07-28", "dow": "Mon", "workouts": [
-            {"dist": 5.0, "title": "Easy", "done": 5.0},
-            {"dist": 6.0, "title": "Easy", "done": 6.1}]},
+            {"dist": 4.0, "title": "Solo Run #1", "done": 4.0},
+            {"dist": 4.0, "title": "Solo Run #1", "done": 4.1}]},
         {"date": "2025-07-29", "dow": "Tue", "workouts": [
-            {"dist": 7.0, "title": "Intervals", "done": 7.0},
-            {"dist": 8.0, "title": "Tempo", "done": 8.0}]},
-        {"date": "2025-07-30", "dow": "Wed", "workouts": [
-            {"dist": 5.0, "title": "Easy", "done": 5.0},
-            {"dist": 6.0, "title": "Easy", "done": 5.5}]},
-        {"date": "2025-07-31", "dow": "Thu", "workouts": [
-            {"dist": 0.0, "title": "Rest", "done": 0.0},
-            {"dist": 0.0, "title": "Rest", "done": 0.0}]},
-        {"date": "2025-08-01", "dow": "Fri", "workouts": [
-            {"dist": 6.0, "title": "Tempo", "done": 6.0},
-            {"dist": 7.0, "title": "Intervals", "done": 7.2}]},
-        {"date": "2025-08-02", "dow": "Sat", "workouts": [
-            {"dist": 4.0, "title": "Easy", "done": 4.0},
-            {"dist": 5.0, "title": "Easy", "done": 5.0}]},
-        {"date": "2025-08-03", "dow": "Sun", "workouts": [
-            {"dist": 12.0, "title": "Long Run", "done": 12.0},
-            {"dist": 14.0, "title": "Long Run", "done": 13.8}]},
-        {"date": "2025-08-04", "dow": "Mon", "workouts": [
-            {"dist": 6.0, "title": "Easy", "done": 6.0},
-            {"dist": 0.0, "title": "Rest", "done": 0.0}]},
-        {"date": "2025-08-05", "dow": "Tue", "workouts": [
-            {"dist": 8.0, "title": "Intervals", "done": 6.0},
-            {"dist": 10.0, "title": "Tempo", "done": 10.0}]},
-        {"date": "2025-08-06", "dow": "Wed", "workouts": [
-            {"dist": 6.0, "title": "Recovery", "done": 5.8},
-            {"dist": 8.0, "title": "Easy", "done": 4.0}]},
-        {"date": "2025-08-07", "dow": "Thu", "workouts": [
             {"dist": 0.0, "title": "Rest", "done": None},
-            {"dist": 12.0, "title": "Long Intervals", "done": None}]},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
+        {"date": "2025-07-30", "dow": "Wed", "workouts": [
+            {"dist": 5.0, "title": "Group Workout", "done": 5.0},
+            {"dist": 5.0, "title": "Group Workout", "done": 4.7}]},
+        {"date": "2025-07-31", "dow": "Thu", "workouts": [
+            {"dist": 4.0, "title": "Solo Run #2", "done": 4.0},
+            {"dist": 4.0, "title": "Solo Run #2", "done": 4.0}]},
+        {"date": "2025-08-01", "dow": "Fri", "workouts": [
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
+        {"date": "2025-08-02", "dow": "Sat", "workouts": [
+            {"dist": 6.0, "title": "Group Long Run", "done": 6.0},
+            {"dist": 6.0, "title": "Group Long Run", "done": 6.3}]},
+        {"date": "2025-08-03", "dow": "Sun", "workouts": [
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
+        {"date": "2025-08-04", "dow": "Mon", "workouts": [
+            {"dist": 4.0, "title": "Solo Run #1", "done": 4.0},
+            {"dist": 4.0, "title": "Solo Run #1", "done": 3.8}]},
+        {"date": "2025-08-05", "dow": "Tue", "workouts": [
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
+        {"date": "2025-08-06", "dow": "Wed", "workouts": [
+            {"dist": 5.0, "title": "Group Workout", "done": 5.0},
+            {"dist": 5.0, "title": "Group Workout", "done": 3.0}]},
+        {"date": "2025-08-07", "dow": "Thu", "workouts": [
+            {"dist": 4.0, "title": "Solo Run #2", "done": None},
+            {"dist": 4.0, "title": "Solo Run #2", "done": None}]},
         {"date": "2025-08-08", "dow": "Fri", "workouts": [
-            {"dist": 10.0, "title": "Tempo", "done": None},
-            {"dist": 6.0, "title": "Easy", "done": None}]},
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
         {"date": "2025-08-09", "dow": "Sat", "workouts": [
-            {"dist": 5.0, "title": "Easy", "done": None},
-            {"dist": 6.0, "title": "Easy", "done": None}]},
+            {"dist": 6.0, "title": "Group Long Run", "done": None},
+            {"dist": 6.0, "title": "Group Long Run", "done": None}]},
         {"date": "2025-08-10", "dow": "Sun", "workouts": [
-            {"dist": 16.0, "title": "Long Run", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None},
             {"dist": 0.0, "title": "Rest", "done": None}]},
         {"date": "2025-08-11", "dow": "Mon", "workouts": [
-            {"dist": 6.0, "title": "Easy", "done": None},
-            {"dist": 7.0, "title": "Easy", "done": None}]},
+            {"dist": 4.0, "title": "Solo Run #1", "done": None},
+            {"dist": 4.0, "title": "Solo Run #1", "done": None}]},
         {"date": "2025-08-12", "dow": "Tue", "workouts": [
-            {"dist": 8.0, "title": "Intervals", "done": None},
-            {"dist": 10.0, "title": "Tempo", "done": None}]},
-        {"date": "2025-08-13", "dow": "Wed", "workouts": [
-            {"dist": 5.0, "title": "Recovery", "done": None},
-            {"dist": 6.0, "title": "Easy", "done": None}]},
-        {"date": "2025-08-14", "dow": "Thu", "workouts": [
             {"dist": 0.0, "title": "Rest", "done": None},
-            {"dist": 12.0, "title": "Long Intervals", "done": None}]},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
+        {"date": "2025-08-13", "dow": "Wed", "workouts": [
+            {"dist": 5.0, "title": "Group Workout", "done": None},
+            {"dist": 5.0, "title": "Group Workout", "done": None}]},
+        {"date": "2025-08-14", "dow": "Thu", "workouts": [
+            {"dist": 4.0, "title": "Solo Run #2", "done": None},
+            {"dist": 4.0, "title": "Solo Run #2", "done": None}]},
         {"date": "2025-08-15", "dow": "Fri", "workouts": [
-            {"dist": 10.0, "title": "Tempo", "done": None},
-            {"dist": 6.0, "title": "Easy", "done": None}]},
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
         {"date": "2025-08-16", "dow": "Sat", "workouts": [
-            {"dist": 5.0, "title": "Easy", "done": None},
-            {"dist": 6.0, "title": "Easy", "done": None}]},
+            {"dist": 6.0, "title": "Group Long Run", "done": None},
+            {"dist": 6.0, "title": "Group Long Run", "done": None}]},
         {"date": "2025-08-17", "dow": "Sun", "workouts": [
-            {"dist": 17.0, "title": "Long Run", "done": None},
-            {"dist": 18.0, "title": "Long Run", "done": None}]},
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
     ],
     "people": [
-        {"name": "Ruby", "planned": 35.0, "actual": 23.6},
-        {"name": "Jiaren", "planned": 42.0, "actual": 18.3},
+        {"name": "Ruby", "planned": 19.0, "actual": 9.0},
+        {"name": "Jiaren", "planned": 19.0, "actual": 6.8},
     ],
 }
 DEMO_WEATHER = {"temp": 72, "code": 1, "condition": "Mainly Clear",
