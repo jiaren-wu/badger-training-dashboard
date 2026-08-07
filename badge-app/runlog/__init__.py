@@ -1451,7 +1451,18 @@ def draw():
         screen.text(tmp, 8, 3)
         tw, _ = screen.measure_text(tmp)
         cx = 8 + tw + 6
-        cond = _fit(weather.get("condition", "") or "", 152 - cx)
+        # City (geolocated, e.g. "Seattle"/"Shoreline") right-aligned on the
+        # same line; the AQI row below no longer repeats it.
+        city_x = 152
+        if location_detected:
+            city = LOCATION_NAME
+            if len(city) > 12:
+                city = city[:12]
+            screen.brush = gray
+            cw, _ = screen.measure_text(city)
+            city_x = 152 - cw
+            screen.text(city, city_x, 3)
+        cond = _fit(weather.get("condition", "") or "", (city_x - 6) - cx)
         screen.brush = white
         screen.text(cond, cx, 3)
     else:
@@ -1466,12 +1477,9 @@ def draw():
     if aqi:
         label, brush = aqi_style(aqi.get("us_aqi"))
         val = aqi.get("us_aqi")
-        left = LOCATION_NAME if location_detected else "Air"
         screen.font = small_font
         screen.brush = gray
-        if len(left) > 12:
-            left = left[:12]
-        screen.text(left, 8, y)
+        screen.text("Air", 8, y)
         aq = "AQI %s %s" % ("--" if val is None else int(val), label)
         screen.brush = brush
         aw, _ = screen.measure_text(aq)
