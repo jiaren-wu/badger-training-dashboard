@@ -400,6 +400,17 @@ def wlan_start():
     try:
         if not wlan.active():
             wlan.active(True)
+            # Disable the CYW43's aggressive radio power-management unless the
+            # user explicitly opted into WiFi power-save. The default PM mode
+            # sleeps the radio between beacons and is a well-known cause of slow
+            # or failed association ("keeps retrying / WiFi failed") on this
+            # chip; PM_NONE trades a little idle current for a reliable connect.
+            if not WIFI_POWER_SAVE:
+                try:
+                    pm_none = getattr(wlan, "PM_NONE", 0xa11140)
+                    wlan.config(pm=pm_none)
+                except Exception:
+                    pass
     except Exception:
         pass
     # Already associated (and has an IP)?  Fast path.
