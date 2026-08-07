@@ -501,7 +501,11 @@ def fetch_dashboard():
 # ---------------------------------------------------------------------------
 def start_refresh():
     global refresh_queue, loading, running_live, weather_live
-    refresh_queue = ["wifi", "location", "weather", "aqi", "dashboard", "finish"]
+    # Fetch the dashboard first (right after WiFi) so its TLS handshake runs
+    # while the ESP32 heap is freshest. Doing location/weather/aqi first can
+    # fragment memory enough that the 4th HTTPS handshake (dashboard) fails,
+    # which showed up as live weather but an "Offline - retry" dashboard.
+    refresh_queue = ["wifi", "dashboard", "location", "weather", "aqi", "finish"]
     loading = True
     running_live = False
     weather_live = False
@@ -543,6 +547,7 @@ def step_refresh():
     elif step == "dashboard":
         if connected:
             try:
+                gc.collect()  # free heap before the TLS handshake (ESP32)
                 if fetch_dashboard():
                     running_live = True
             except Exception as e:
@@ -558,6 +563,8 @@ def step_refresh():
             status = "Live"
         elif not WIFI_SSID or network is None:
             status = "Demo - no WiFi"
+        elif not connected:
+            status = "WiFi failed"
         elif not DASHBOARD_URL:
             status = "Demo - set URL"
         else:
