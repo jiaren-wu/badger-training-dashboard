@@ -709,6 +709,18 @@ def rain_soon(w):
     return (prob is not None and prob >= 50) or (mm is not None and mm >= 0.2)
 
 
+def precip_label(code):
+    """Precipitation word for the outlook row, derived from the WMO code so it
+    matches the top-line condition (snow/hail don't get mislabelled "Rain")."""
+    if code in (71, 73, 75, 77, 85, 86):
+        return "Snow"
+    if code in (95, 96, 99):          # thunderstorm (96/99 include hail)
+        return "Storm"
+    if code in (56, 57, 66, 67):      # freezing drizzle / freezing rain
+        return "Ice"
+    return "Rain"
+
+
 # ---------------------------------------------------------------------------
 # Running dashboard
 # ---------------------------------------------------------------------------
@@ -1472,42 +1484,50 @@ def draw():
     screen.brush = dim
     screen.draw(shapes.rectangle(8, 13, 144, 1))
 
-    # ---- current air quality strip ----
+    # ---- UV index (left) + current AQI (right) ----
     y = 17
+    screen.font = small_font
+    uv = weather.get("uv") if weather is not None else None
+    screen.brush = white
+    screen.text("UV", 8, y)
+    if uv is None:
+        screen.brush = gray
+        screen.text("--", 26, y)
+    else:
+        ulabel, ubrush = uv_style(uv)
+        screen.brush = ubrush
+        screen.text("%d %s" % (int(round(uv)), ulabel), 26, y)
     if aqi:
         label, brush = aqi_style(aqi.get("us_aqi"))
         val = aqi.get("us_aqi")
-        screen.font = small_font
-        screen.brush = gray
-        screen.text("Air", 8, y)
         aq = "AQI %s %s" % ("--" if val is None else int(val), label)
         screen.brush = brush
         aw, _ = screen.measure_text(aq)
         screen.text(aq, 152 - aw, y)
 
-    # ---- next-hour outlook: rain + AQI trend ----
+    # ---- next-hour outlook: rain (left) + AQI trend (right) ----
     y2 = 27
     screen.font = small_font
-    # Left slot: when rain is likely, show the next-hour chance (blue). When it
-    # is dry the sun matters more to a runner, so show the UV index instead.
-    raining = (weather is not None) and rain_soon(weather)
-    if raining:
+    screen.brush = white
+    screen.text("1h", 8, y2)
+    if weather is not None:
         prob = weather.get("rain_prob")
-        screen.brush = white
-        screen.text("1h", 8, y2)
-        screen.brush = blue
-        screen.text("Rain %d%%" % (0 if prob is None else int(prob)), 26, y2)
-    else:
-        uv = weather.get("uv") if weather is not None else None
-        screen.brush = white
-        screen.text("UV", 8, y2)
-        if uv is None:
-            screen.brush = gray
-            screen.text("--", 26, y2)
+        soon = rain_soon(weather)
+        plabel = precip_label(weather.get("code"))
+        if prob is None and weather.get("rain_mm") is None:
+            ptxt = "%s --" % plabel
         else:
-            ulabel, ubrush = uv_style(uv)
-            screen.brush = ubrush
-            screen.text("%d %s" % (int(round(uv)), ulabel), 26, y2)
+            ptxt = "%s %d%%" % (plabel, 0 if prob is None else int(prob))
+        if not soon:
+            screen.brush = gray
+        elif plabel in ("Storm", "Ice"):
+            screen.brush = orange          # hazardous underfoot -> caution
+        else:
+            screen.brush = blue
+        screen.text(ptxt, 26, y2)
+    else:
+        screen.brush = gray
+        screen.text("Rain --", 26, y2)
     if aqi is not None:
         nxt = aqi.get("next")
         if nxt is None:
