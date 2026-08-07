@@ -59,7 +59,9 @@ large_font = PixelFont.load("/system/assets/fonts/absolute.ppf")
 # Palette (GitHub dark)
 # ---------------------------------------------------------------------------
 white = brushes.color(235, 245, 255)
-phosphor = brushes.color(211, 250, 55)
+# Primary accent. Themed to Seattle (teal-blue/green + white + gray) instead of
+# the original GitHub-Universe phosphor yellow-green. Used for headers/labels.
+phosphor = brushes.color(64, 208, 184)
 background = brushes.color(13, 17, 23)
 black = brushes.color(0, 0, 0)
 gray = brushes.color(110, 120, 130)
@@ -68,6 +70,7 @@ track = brushes.color(38, 44, 52)
 blue = brushes.color(48, 148, 255)
 green = brushes.color(63, 210, 110)
 orange = brushes.color(255, 165, 0)
+yellow = brushes.color(240, 214, 72)   # UV "moderate" (EPA UV colour scale)
 red = brushes.color(248, 81, 73)
 purple = brushes.color(188, 140, 255)
 cyan = brushes.color(56, 232, 225)
@@ -120,7 +123,7 @@ ticks_start = None
 _wifi_connect_ts = None       # io.ticks when we last issued wlan.connect()
 config_loaded = False
 
-weather = None                # {'temp','code','condition'}
+weather = None                # {'temp','code','condition','rain_prob','rain_mm','uv'}
 aqi = None                    # {'us_aqi','pm2_5','label','brush'}
 dashboard = None              # parsed running data
 running_live = False          # true when running numbers came from DASHBOARD_URL
@@ -278,7 +281,7 @@ DEMO_DASHBOARD = {
     ],
 }
 DEMO_WEATHER = {"temp": 72, "code": 1, "condition": "Mainly Clear",
-                "rain_prob": 0, "rain_mm": 0.0}
+                "rain_prob": 0, "rain_mm": 0.0, "uv": 5}
 DEMO_AQI = {"us_aqi": 42, "pm2_5": 9.4, "next": 48}
 
 
@@ -584,7 +587,7 @@ def fetch_weather():
     global weather, today_iso
     unit = "fahrenheit" if use_fahrenheit else "celsius"
     url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
-           "&current=temperature_2m,weather_code"
+           "&current=temperature_2m,weather_code,uv_index"
            "&hourly=precipitation_probability,precipitation&forecast_hours=2"
            "&temperature_unit=%s&timezone=auto"
            % (LATITUDE, LONGITUDE, unit))
@@ -623,6 +626,7 @@ def fetch_weather():
         "condition": WMO.get(code, "Unknown"),
         "rain_prob": prob,
         "rain_mm": mm,
+        "uv": c.get("uv_index"),
     }
 
 
@@ -668,6 +672,34 @@ def aqi_style(value):
     if i < 0:
         return "--", gray
     return AQI_LABELS[i], AQI_BRUSHES[i]
+
+
+UV_LABELS = ("Lo", "Mod", "Hi", "VHi", "Ext")
+UV_BRUSHES = (green, yellow, orange, red, purple)
+
+
+def uv_cat(value):
+    """WHO UV-index band: 0 Low, 1 Moderate, 2 High, 3 Very High, 4 Extreme.
+    Returns -1 when unknown."""
+    if value is None:
+        return -1
+    if value < 3:
+        return 0
+    if value < 6:
+        return 1
+    if value < 8:
+        return 2
+    if value < 11:
+        return 3
+    return 4
+
+
+def uv_style(value):
+    """Return (short label, brush) for a UV index value."""
+    i = uv_cat(value)
+    if i < 0:
+        return "--", gray
+    return UV_LABELS[i], UV_BRUSHES[i]
 
 
 def rain_soon(w):
@@ -1196,19 +1228,6 @@ def _today():
     return None
 
 
-def _date_header():
-    iso = _today()
-    if not iso:
-        return "TRAINING"
-    try:
-        _, m, d = _parse_ymd(iso)
-        wd = _weekday_mon0(iso)
-        dow = _DOW_APP[wd] if wd is not None else ""
-        return ("%s %s %d" % (dow, _MON[m], d)).strip()
-    except Exception:
-        return "TRAINING"
-
-
 def _fit(txt, maxw):
     """Truncate txt (with trailing '..') so it fits within maxw pixels."""
     try:
@@ -1421,21 +1440,23 @@ def draw():
         week = dashboard.get("week_start", "")
     people = current_people(names, weeks)
 
-    # ---- header: current date (falls back to "TRAINING" until clock syncs) ----
+    # ---- top line: current weather (temp + condition) ----
+    # Replaces the old date / "TRAINING" title: the plan-detail screens still
+    # show the date and the footer shows the clock, so the home screen leads
+    # with the weather glance instead.
     screen.font = small_font
-    screen.brush = phosphor
-    screen.text(_date_header(), 8, 3)
-
-    # weather at top-right: "72F Clear"
     if weather:
-        wt = "%d%s %s" % (weather["temp"], "F" if use_fahrenheit else "C",
-                          weather["condition"])
+        tmp = "%d%s" % (weather["temp"], "F" if use_fahrenheit else "C")
+        screen.brush = phosphor
+        screen.text(tmp, 8, 3)
+        tw, _ = screen.measure_text(tmp)
+        cx = 8 + tw + 6
+        cond = _fit(weather.get("condition", "") or "", 152 - cx)
         screen.brush = white
-        ww, _ = screen.measure_text(wt)
-        if ww > 96:
-            wt = "%d%s" % (weather["temp"], "F" if use_fahrenheit else "C")
-            ww, _ = screen.measure_text(wt)
-        screen.text(wt, 152 - ww, 3)
+        screen.text(cond, cx, 3)
+    else:
+        screen.brush = gray
+        screen.text("Weather --", 8, 3)
 
     screen.brush = dim
     screen.draw(shapes.rectangle(8, 13, 144, 1))
@@ -1459,17 +1480,26 @@ def draw():
     # ---- next-hour outlook: rain + AQI trend ----
     y2 = 27
     screen.font = small_font
-    screen.brush = white
-    screen.text("1h", 8, y2)
-    if weather is not None:
+    # Left slot: when rain is likely, show the next-hour chance (blue). When it
+    # is dry the sun matters more to a runner, so show the UV index instead.
+    raining = (weather is not None) and rain_soon(weather)
+    if raining:
         prob = weather.get("rain_prob")
-        soon = rain_soon(weather)
-        if prob is None and weather.get("rain_mm") is None:
-            rain_txt = "Rain --"
+        screen.brush = white
+        screen.text("1h", 8, y2)
+        screen.brush = blue
+        screen.text("Rain %d%%" % (0 if prob is None else int(prob)), 26, y2)
+    else:
+        uv = weather.get("uv") if weather is not None else None
+        screen.brush = white
+        screen.text("UV", 8, y2)
+        if uv is None:
+            screen.brush = gray
+            screen.text("--", 26, y2)
         else:
-            rain_txt = "Rain %d%%" % (0 if prob is None else int(prob))
-        screen.brush = blue if soon else gray
-        screen.text(rain_txt, 26, y2)
+            ulabel, ubrush = uv_style(uv)
+            screen.brush = ubrush
+            screen.text("%d %s" % (int(round(uv)), ulabel), 26, y2)
     if aqi is not None:
         nxt = aqi.get("next")
         if nxt is None:
