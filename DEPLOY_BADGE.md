@@ -27,7 +27,16 @@ filesystem is restored from templates on every boot.
      cable/port (must be a *data* cable, not charge-only).
 
 ## Step 2 — Copy the app
-Copy the whole `runlog` folder into the badge's apps directory. In Terminal:
+
+**Quick way (recommended):** once the `BADGER` volume is mounted, just run the
+bundled script — it copies only the app files, strips macOS sidecar files, syncs,
+and ejects:
+
+```bash
+bash badge-app/deploy_to_badge.sh
+```
+
+**Manual way:** copy the whole `runlog` folder into the badge's apps directory:
 
 ```bash
 cp -R "badge-app/runlog" "/Volumes/BADGER/apps/runlog"
@@ -35,6 +44,10 @@ cp -R "badge-app/runlog" "/Volumes/BADGER/apps/runlog"
 find "/Volumes/BADGER/apps/runlog" -name '._*' -delete
 find "/Volumes/BADGER/apps/runlog" -name '.DS_Store' -delete
 ```
+
+> Updating an already-installed badge? No new `secrets.py` values are needed for
+> the multi-week / week-pagination update — the script leaves your WiFi and
+> `DASHBOARD_URL` untouched. You can skip Step 3.
 
 (That includes `__init__.py` and `icon.png` — the icon is what shows in the menu.
 The badge's apps live at the **volume root** `/Volumes/BADGER/apps/`, which maps to
@@ -57,7 +70,7 @@ WIFI_PASSWORD = "your-wifi-password"
 # --- Training dashboard (optional) ---
 # Public URL of dashboard.json from the backend (GitHub Pages / gist raw).
 # Leave commented out to run in demo mode.
-# DASHBOARD_URL = "https://YOURNAME.github.io/badger/dashboard.json"
+# DASHBOARD_URL = "https://jiaren-wu.github.io/badger-training-dashboard/dashboard.json"
 
 # Distance units: "mi" or "km"
 DIST_UNITS = "mi"
@@ -81,14 +94,31 @@ Save and close the file.
 ## Step 5 — Open it
 1. From the badge menu, scroll to the **runlog** icon (a small progress ring /
    road) and select it.
-2. It connects to WiFi (~1–2s), then shows:
-   - **TRAINING** header + current temp / conditions,
+2. It connects to WiFi (~1–2s), then shows the **current week**:
+   - the **current date** header (e.g. `Wed Aug 6`) + current temp / conditions,
    - an **air-quality** strip (city + US AQI + category),
    - a **1h** line — next-hour **rain %** and whether **AQI** is trending
      up / dn / flat,
-   - **Jiaren** and **Ruby** each with `actual / planned mi` and a **%** bar,
-   - a footer: **Live** (green) if it loaded your `DASHBOARD_URL`, else **Demo**.
-3. Press **B** any time to refresh.
+   - **Ruby** (on top) and **Jiaren** each with `actual / planned mi` and a **%** bar,
+   - a footer: **Live** (green) if it loaded your `DASHBOARD_URL`, else **Demo**,
+     plus a small **C plan** hint.
+
+### Buttons (A = left, B = middle, C = right)
+
+| Button | Action |
+| --- | --- |
+| **C** (right) | Show the **workout detail** — today's workout (or the next one this week). Press **C** again to step forward day by day through Sunday. |
+| **A** (left) | Step **back** to the previous workout. From the main screen it opens the last workout before today (nothing if today is Monday). |
+| **B** (middle) | Jump back to the **current-day** screen. Press again there to **refresh** now. |
+| **DOWN** | Page through **upcoming weeks** (4 per screen, planned mileage). |
+| **UP** | Page through **past weeks** — actual **/** planned progress, newest first. |
+| back / home | Exit the app. |
+
+The workout screen shows both runners for the chosen day: planned distance +
+title, and (for today or past days) the **actual** mileage done.
+
+Data refreshes automatically every **15 min** while awake, and **hourly**
+overnight while the screen is dark.
 
 ---
 

@@ -1,14 +1,34 @@
 import sys
 import os
 
-sys.path.insert(0, "/system/apps/runlog")
-os.chdir("/system/apps/runlog")
+# On the badge these make imports + relative asset paths resolve. On the
+# desktop simulator the path doesn't exist, so failing is fine.
+try:
+    sys.path.insert(0, "/system/apps/runlog")
+    os.chdir("/system/apps/runlog")
+except Exception:
+    pass
 
 from badgeware import io, brushes, shapes, screen, PixelFont, run
-import network
-from urllib.urequest import urlopen
+
+# `network` / MicroPython urlopen only exist on the badge. Guard them so the
+# app also imports (and shows demo data) under the desktop simulator.
+try:
+    import network
+except Exception:
+    network = None
+try:
+    from urllib.urequest import urlopen
+except Exception:
+    try:
+        from urllib.request import urlopen  # CPython / simulator
+    except Exception:
+        urlopen = None
+
 import json
 import gc
+
+from nightmode import NightMode
 
 # ---------------------------------------------------------------------------
 # Fonts
@@ -22,6 +42,7 @@ large_font = PixelFont.load("/system/assets/fonts/absolute.ppf")
 white = brushes.color(235, 245, 255)
 phosphor = brushes.color(211, 250, 55)
 background = brushes.color(13, 17, 23)
+black = brushes.color(0, 0, 0)
 gray = brushes.color(110, 120, 130)
 dim = brushes.color(70, 78, 88)
 track = brushes.color(38, 44, 52)
@@ -40,6 +61,12 @@ DASHBOARD_URL = None          # optional: URL returning dashboard.json
 WEATHER_LOCATION = None       # optional: same formats as the weather app
 DIST_UNITS = "mi"             # "mi" or "km"
 WIFI_TIMEOUT = 45
+
+# Night mode: display goes dark between these hours (local time); any button
+# wakes it for WAKE_SECONDS. Overridable from /secrets.py.
+NIGHT_START_H = 23            # 11 PM
+NIGHT_END_H = 6               # 6 AM
+WAKE_SECONDS = 20
 
 # Location
 LATITUDE = None
@@ -61,17 +88,90 @@ dashboard = None              # parsed running data
 running_live = False          # true when running numbers came from DASHBOARD_URL
 weather_live = False          # true when weather came from the network
 status = "Starting..."
-loading = False
 last_update = None
 auto_refresh = True
-AUTO_REFRESH_MS = 15 * 60 * 1000   # 15 minutes
+AUTO_REFRESH_MS = 15 * 60 * 1000   # 15 minutes (awake)
+NIGHT_REFRESH_MS = 60 * 60 * 1000  # 1 hour (slower cadence while asleep)
+
+# Night mode controller (local clock from network time + io.ticks).
+night = NightMode(NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS * 1000)
+_display_on = True
+_forced_hhmm = None           # simulator/testing override, e.g. "23:30"
+_forced_page = None           # simulator/testing override, e.g. 1 or 2
+
+# Refresh state machine. Each update() frame performs at most ONE blocking
+# network call so the main loop keeps ticking (and never stalls long enough to
+# trip the hardware watchdog / bounce back to the launcher).
+refresh_queue = None          # list of remaining step names, or None when idle
+loading = False
+
+# Multi-week pagination / navigation state defined below.
+# Navigation. Two views:
+#   * "week"    : page 0 = current week (detailed). page > 0 = upcoming weeks
+#                 (planned, DOWN). page < 0 = past weeks (progress, UP).
+#   * "workout" : one day's detailed plan; LEFT/RIGHT (A/C) step between the
+#                 week's workouts, seeded at today.
+# Buttons: A=LEFT (prev workout), B=MIDDLE (home/current; refresh if already
+# home), C=RIGHT (next workout), UP=past weeks, DOWN=upcoming weeks.
+LOOKAHEAD_PER_PAGE = 4
+view = "week"
+page = 0
+wk_idx = 0
+today_iso = None              # "YYYY-MM-DD" from the network clock, when known
+_forced_date = None           # simulator/testing override, e.g. "2026-08-05"
+_forced_view = None           # simulator/testing override: "week" | "workout"
+_forced_wk = None             # simulator/testing override: workout day index
 
 # ---------------------------------------------------------------------------
-# Demo data so the dashboard renders even with no WiFi / no backend yet
+# Demo data so the dashboard renders even with no WiFi / no backend yet.
+# Multi-week shape mirrors the backend: names[i] lines up with each week's
+# planned[i]/actual[i]; weeks[0] is the current week, the rest are upcoming.
 # ---------------------------------------------------------------------------
 DEMO_DASHBOARD = {
-    "week_start": "Mon",
+    "week_start": "2025-08-04",
     "units": "mi",
+    "today": "2025-08-06",
+    "names": ["Ruby", "Jiaren"],
+    "weeks": [
+        {"start": "2025-08-04", "planned": [35.0, 42.0], "actual": [23.6, 18.3]},
+        {"start": "2025-08-11", "planned": [38.0, 44.0], "actual": [0.0, 0.0]},
+        {"start": "2025-08-18", "planned": [40.0, 26.2], "actual": [0.0, 0.0]},
+        {"start": "2025-08-25", "planned": [42.0, 46.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-01", "planned": [30.0, 48.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-08", "planned": [45.0, 50.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-15", "planned": [48.0, 30.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-22", "planned": [26.2, 52.0], "actual": [0.0, 0.0]},
+        {"start": "2025-09-29", "planned": [50.0, 26.2], "actual": [0.0, 0.0]},
+    ],
+    "past": [
+        {"start": "2025-07-07", "planned": [32.0, 40.0], "actual": [30.1, 41.2]},
+        {"start": "2025-07-14", "planned": [34.0, 41.0], "actual": [33.0, 40.5]},
+        {"start": "2025-07-21", "planned": [35.0, 42.0], "actual": [31.8, 39.0]},
+        {"start": "2025-07-28", "planned": [36.0, 43.0], "actual": [35.2, 42.1]},
+    ],
+    "days": [
+        {"date": "2025-08-04", "dow": "Mon", "workouts": [
+            {"dist": 6.0, "title": "Easy", "done": 6.0},
+            {"dist": 0.0, "title": "Rest", "done": 0.0}]},
+        {"date": "2025-08-05", "dow": "Tue", "workouts": [
+            {"dist": 8.0, "title": "Intervals", "done": 6.0},
+            {"dist": 10.0, "title": "Tempo", "done": 10.0}]},
+        {"date": "2025-08-06", "dow": "Wed", "workouts": [
+            {"dist": 6.0, "title": "Recovery", "done": 5.8},
+            {"dist": 8.0, "title": "Easy", "done": 4.0}]},
+        {"date": "2025-08-07", "dow": "Thu", "workouts": [
+            {"dist": 0.0, "title": "Rest", "done": None},
+            {"dist": 12.0, "title": "Long Intervals", "done": None}]},
+        {"date": "2025-08-08", "dow": "Fri", "workouts": [
+            {"dist": 10.0, "title": "Tempo", "done": None},
+            {"dist": 6.0, "title": "Easy", "done": None}]},
+        {"date": "2025-08-09", "dow": "Sat", "workouts": [
+            {"dist": 5.0, "title": "Easy", "done": None},
+            {"dist": 6.0, "title": "Easy", "done": None}]},
+        {"date": "2025-08-10", "dow": "Sun", "workouts": [
+            {"dist": 16.0, "title": "Long Run", "done": None},
+            {"dist": 0.0, "title": "Rest", "done": None}]},
+    ],
     "people": [
         {"name": "Ruby", "planned": 35.0, "actual": 23.6},
         {"name": "Jiaren", "planned": 42.0, "actual": 18.3},
@@ -87,7 +187,9 @@ DEMO_AQI = {"us_aqi": 42, "pm2_5": 9.4, "next": 48}
 # ---------------------------------------------------------------------------
 def load_config():
     global WIFI_SSID, WIFI_PASSWORD, DASHBOARD_URL, WEATHER_LOCATION
-    global DIST_UNITS, config_loaded
+    global DIST_UNITS, config_loaded, _forced_hhmm, _forced_page
+    global NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS, night
+    global _forced_date, _forced_view, _forced_wk, today_iso, view, wk_idx
     if config_loaded:
         return
     config_loaded = True
@@ -114,22 +216,79 @@ def load_config():
                 DIST_UNITS = U
         except ImportError:
             pass
+        try:
+            from secrets import NIGHT_START_H as NS
+            NIGHT_START_H = int(NS)
+        except Exception:
+            pass
+        try:
+            from secrets import NIGHT_END_H as NE
+            NIGHT_END_H = int(NE)
+        except Exception:
+            pass
+        try:
+            from secrets import WAKE_SECONDS as WS
+            WAKE_SECONDS = int(WS)
+        except Exception:
+            pass
+        night = NightMode(NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS * 1000)
         sys.path.pop(0)
     except Exception as e:
         print("config load error:", e)
 
+    # Optional testing override (used by the desktop simulator).
+    try:
+        _forced_hhmm = os.getenv("RUNLOG_FORCE_HHMM")
+    except Exception:
+        _forced_hhmm = None
+    if _forced_hhmm:
+        try:
+            h, m = _forced_hhmm.split(":")
+            night.sync_from_hm(int(h), int(m), io.ticks)
+        except Exception:
+            pass
+
+    # Optional testing override to jump straight to a page (simulator only).
+    try:
+        fp = os.getenv("RUNLOG_FORCE_PAGE")
+        if fp:
+            _forced_page = int(fp)
+    except Exception:
+        _forced_page = None
+
+    # Optional testing overrides for the date + workout navigation (simulator).
+    try:
+        _forced_date = os.getenv("RUNLOG_FORCE_DATE") or None
+        if _forced_date:
+            today_iso = _forced_date
+    except Exception:
+        _forced_date = None
+    try:
+        _forced_view = os.getenv("RUNLOG_FORCE_VIEW") or None
+        if _forced_view:
+            view = _forced_view
+    except Exception:
+        _forced_view = None
+    try:
+        fw = os.getenv("RUNLOG_FORCE_WK")
+        if fw is not None and fw != "":
+            _forced_wk = int(fw)
+            wk_idx = _forced_wk
+    except Exception:
+        _forced_wk = None
+
 
 # ---------------------------------------------------------------------------
-# WiFi
+# WiFi (non-blocking: polled across frames)
 # ---------------------------------------------------------------------------
 def wlan_start():
     global wlan, ticks_start, connected
+    if network is None or not WIFI_SSID:
+        return False
     if ticks_start is None:
         ticks_start = io.ticks
     if connected:
         return True
-    if not WIFI_SSID:
-        return False
     if wlan is None:
         wlan = network.WLAN(network.STA_IF)
         wlan.active(True)
@@ -150,6 +309,8 @@ def wlan_start():
 # HTTP helper
 # ---------------------------------------------------------------------------
 def http_json(url):
+    if urlopen is None:
+        raise OSError("no network")
     response = urlopen(url, headers={"User-Agent": "GitHubBadge"})
     data = b""
     chunk = bytearray(512)
@@ -167,6 +328,10 @@ def http_json(url):
 # ---------------------------------------------------------------------------
 # Location
 # ---------------------------------------------------------------------------
+def _is_num(v):
+    return isinstance(v, (int, float))
+
+
 def resolve_location():
     global LATITUDE, LONGITUDE, LOCATION_NAME, COUNTRY_CODE
     global location_detected, use_fahrenheit
@@ -202,15 +367,12 @@ def resolve_location():
         location_detected = True
     except Exception as e:
         print("IP geolocation error:", e)
-        LATITUDE, LONGITUDE = 37.3382, -121.8863
-        LOCATION_NAME = "San Jose"
+        # Default to Seattle 98115 (owner's home) rather than failing.
+        LATITUDE, LONGITUDE = 47.6849, -122.2968
+        LOCATION_NAME = "Seattle"
         COUNTRY_CODE = "US"
         use_fahrenheit = True
         location_detected = True
-
-
-def _is_num(v):
-    return isinstance(v, (int, float))
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +389,7 @@ WMO = {
 
 
 def fetch_weather():
-    global weather
+    global weather, today_iso
     unit = "fahrenheit" if use_fahrenheit else "celsius"
     url = ("https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s"
            "&current=temperature_2m,weather_code"
@@ -237,6 +399,20 @@ def fetch_weather():
     r = http_json(url)
     c = r["current"]
     code = c["weather_code"]
+    # Sync the local clock from the network (timezone=auto -> local time).
+    # Skip when a testing override is active so the simulator stays deterministic.
+    try:
+        if c.get("time") and not _forced_hhmm:
+            night.sync_from_iso(c["time"], io.ticks)
+    except Exception as e:
+        print("time sync:", e)
+    # Capture today's calendar date (local) so the header + workout screens know
+    # which day it is. Skip when a testing override is active.
+    try:
+        if c.get("time") and not _forced_date:
+            today_iso = c["time"][:10]
+    except Exception as e:
+        print("date sync:", e)
     prob = None
     mm = None
     try:
@@ -320,60 +496,128 @@ def fetch_dashboard():
     return True
 
 
-def refresh_all():
-    """Pull everything; fall back to demo data on any failure."""
-    global weather, aqi, dashboard, running_live, weather_live
-    global status, loading, last_update
+# ---------------------------------------------------------------------------
+# Refresh state machine (one network step per frame)
+# ---------------------------------------------------------------------------
+def start_refresh():
+    global refresh_queue, loading, running_live, weather_live
+    refresh_queue = ["wifi", "location", "weather", "aqi", "dashboard", "finish"]
     loading = True
     running_live = False
     weather_live = False
 
-    state = wlan_start()
-    if state is True:
-        try:
-            resolve_location()
-        except Exception as e:
-            print("location error:", e)
-        try:
-            fetch_weather()
-            weather_live = True
-        except Exception as e:
-            print("weather error:", e)
-        try:
-            fetch_aqi()
-        except Exception as e:
-            print("aqi error:", e)
-        try:
-            if fetch_dashboard():
-                running_live = True
-        except Exception as e:
-            print("dashboard error:", e)
-    elif state is None:
-        status = "Connecting WiFi..."
+
+def step_refresh():
+    """Run one refresh step. At most one blocking network call per frame."""
+    global refresh_queue, loading, running_live, weather_live
+    global status, last_update, weather, aqi, dashboard
+    if not refresh_queue:
+        return
+    step = refresh_queue[0]
+
+    if step == "wifi":
+        state = wlan_start()
+        if state is None:
+            status = "Connecting WiFi..."
+            return  # keep polling next frame, don't advance
+        # advance whether connected (True) or gave up (False)
+    elif step == "location":
+        if connected:
+            try:
+                resolve_location()
+            except Exception as e:
+                print("location error:", e)
+    elif step == "weather":
+        if connected:
+            try:
+                fetch_weather()
+                weather_live = True
+            except Exception as e:
+                print("weather error:", e)
+    elif step == "aqi":
+        if connected:
+            try:
+                fetch_aqi()
+            except Exception as e:
+                print("aqi error:", e)
+    elif step == "dashboard":
+        if connected:
+            try:
+                if fetch_dashboard():
+                    running_live = True
+            except Exception as e:
+                print("dashboard error:", e)
+    elif step == "finish":
+        if weather is None:
+            weather = dict(DEMO_WEATHER)
+        if aqi is None:
+            aqi = dict(DEMO_AQI)
+        if dashboard is None:
+            dashboard = dict(DEMO_DASHBOARD)
+        if running_live:
+            status = "Live"
+        elif not WIFI_SSID or network is None:
+            status = "Demo - no WiFi"
+        elif not DASHBOARD_URL:
+            status = "Demo - set URL"
+        else:
+            status = "Offline - retry"
+        last_update = io.ticks
         loading = False
-        return  # keep trying next frame
+        gc.collect()
 
-    # Fallbacks so the screen is always useful
-    if weather is None:
-        weather = dict(DEMO_WEATHER)
-    if aqi is None:
-        aqi = dict(DEMO_AQI)
-    if dashboard is None:
-        dashboard = dict(DEMO_DASHBOARD)
+    refresh_queue.pop(0)
+    if not refresh_queue:
+        refresh_queue = None
 
-    # Footer status reflects the RUNNING data (the app's purpose)
-    if running_live:
-        status = "Live"
-    elif not WIFI_SSID:
-        status = "Demo - no WiFi"
-    elif not DASHBOARD_URL:
-        status = "Demo - set URL"
+
+# ---------------------------------------------------------------------------
+# Display power (night mode).  The screen-backlight API isn't documented, so we
+# probe a few likely calls and always fall back to a black frame + LEDs off.
+# ---------------------------------------------------------------------------
+def _try_backlight(level01):
+    try:
+        from badgeware import display as _disp
+    except Exception:
+        _disp = None
+    targets = []
+    if _disp is not None:
+        targets.append(_disp)
+    targets.append(screen)
+    ok = False
+    for obj in targets:
+        for attr, is_float in (("set_backlight", True), ("backlight", True),
+                               ("set_brightness", False), ("brightness", False)):
+            fn = getattr(obj, attr, None)
+            if callable(fn):
+                try:
+                    fn(level01 if is_float else int(level01 * 255))
+                    ok = True
+                except Exception:
+                    continue
+    return ok
+
+
+def _leds_off():
+    try:
+        for k in (io.LED_TOP_LEFT, io.LED_TOP_RIGHT,
+                  io.LED_BOTTOM_LEFT, io.LED_BOTTOM_RIGHT):
+            io.led[k] = 0
+    except Exception:
+        pass
+
+
+def display_power(on):
+    global _display_on
+    if on:
+        if not _display_on:
+            _try_backlight(1.0)
+            _display_on = True
     else:
-        status = "Offline - retry"
-
-    last_update = io.ticks
-    loading = False
-    gc.collect()
+        if _display_on:
+            _try_backlight(0.0)
+            _leds_off()
+            _display_on = False
 
 
 # ---------------------------------------------------------------------------
@@ -433,22 +677,270 @@ def draw_person(person, y, units):
     draw_progress(8, y + 20, 144, 7, pct)
 
 
+def draw_sleep():
+    """Night mode: fully dark screen."""
+    screen.brush = black
+    screen.clear()
+
+
+# ---------------------------------------------------------------------------
+# Multi-week data access (works with the new names+weeks schema or the legacy
+# single-week {people:[...]} shape).
+# ---------------------------------------------------------------------------
+_MON = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fmt_md(iso):
+    try:
+        p = iso.split("-")
+        return "%s %d" % (_MON[int(p[1])], int(p[2]))
+    except Exception:
+        return iso or "?"
+
+
+def dashboard_weeks():
+    """Return (names, weeks) from either the new or the legacy schema."""
+    if not dashboard:
+        return [], []
+    names = dashboard.get("names")
+    weeks = dashboard.get("weeks")
+    if names and weeks:
+        return names, weeks
+    people = dashboard.get("people") or []
+    names = [p.get("name", "?") for p in people]
+    wk = {
+        "start": dashboard.get("week_start", ""),
+        "planned": [float(p.get("planned", 0) or 0) for p in people],
+        "actual": [float(p.get("actual", 0) or 0) for p in people],
+    }
+    return names, [wk]
+
+
+def max_page():
+    """Highest page index available (0 = only the current week)."""
+    _, weeks = dashboard_weeks()
+    future = len(weeks) - 1
+    if future <= 0:
+        return 0
+    return 1 + (future - 1) // LOOKAHEAD_PER_PAGE
+
+
+def current_people(names, weeks):
+    """Build current-week person dicts from the (names, weeks) pair."""
+    people = []
+    if weeks:
+        w0 = weeks[0]
+        pl = w0.get("planned", [])
+        ac = w0.get("actual", [])
+        for i, nm in enumerate(names):
+            people.append({
+                "name": nm,
+                "planned": pl[i] if i < len(pl) else 0,
+                "actual": ac[i] if i < len(ac) else 0,
+            })
+    return people
+
+
+# ---------------------------------------------------------------------------
+# Date helpers. MicroPython has no datetime module, so weekday/day-offset math
+# is done with pure-integer civil-day counting (Howard Hinnant's algorithm).
+# ---------------------------------------------------------------------------
+_DOW_APP = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _parse_ymd(iso):
+    p = iso.split("-")
+    return int(p[0]), int(p[1]), int(p[2])
+
+
+def _civil_days(y, m, d):
+    y2 = y - (1 if m <= 2 else 0)
+    era = (y2 if y2 >= 0 else y2 - 399) // 400
+    yoe = y2 - era * 400
+    mp = (m + 9) % 12
+    doy = (153 * mp + 2) // 5 + (d - 1)
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+
+def _iso_days(iso):
+    try:
+        y, m, d = _parse_ymd(iso)
+        return _civil_days(y, m, d)
+    except Exception:
+        return None
+
+
+def _weekday_mon0(iso):
+    n = _iso_days(iso)
+    if n is None:
+        return None
+    return (n + 3) % 7            # 1970-01-01 was a Thursday -> index 3
+
+
+def _today():
+    """Best available 'today' as YYYY-MM-DD, or None."""
+    if _forced_date:
+        return _forced_date
+    if today_iso:
+        return today_iso
+    if dashboard:
+        return dashboard.get("today")
+    return None
+
+
+def _date_header():
+    iso = _today()
+    if not iso:
+        return "TRAINING"
+    try:
+        _, m, d = _parse_ymd(iso)
+        wd = _weekday_mon0(iso)
+        dow = _DOW_APP[wd] if wd is not None else ""
+        return ("%s %s %d" % (dow, _MON[m], d)).strip()
+    except Exception:
+        return "TRAINING"
+
+
+def _fit(txt, maxw):
+    """Truncate txt (with trailing '..') so it fits within maxw pixels."""
+    try:
+        if screen.measure_text(txt)[0] <= maxw:
+            return txt
+        while txt and screen.measure_text(txt + "..")[0] > maxw:
+            txt = txt[:-1]
+        return txt + ".."
+    except Exception:
+        return txt
+
+
+def dashboard_days():
+    if dashboard:
+        d = dashboard.get("days")
+        if d:
+            return d
+    return []
+
+
+def dashboard_past():
+    if dashboard:
+        p = dashboard.get("past")
+        if p:
+            return p
+    return []
+
+
+def today_index():
+    """Index 0..6 of today within the current week, or None if unknown."""
+    _, weeks = dashboard_weeks()
+    if not weeks:
+        return None
+    a = _iso_days(weeks[0].get("start") or "")
+    b = _iso_days(_today() or "")
+    if a is None or b is None:
+        return None
+    off = b - a
+    return 0 if off < 0 else (6 if off > 6 else off)
+
+
+def past_pages():
+    n = len(dashboard_past())
+    if n <= 0:
+        return 0
+    return (n + LOOKAHEAD_PER_PAGE - 1) // LOOKAHEAD_PER_PAGE
+
+
+def min_page():
+    return -past_pages()
+
+
+def _has_wk(idx):
+    """True if day idx has a real workout (someone's planned distance > 0)."""
+    days = dashboard_days()
+    if idx < 0 or idx >= len(days):
+        return False
+    for w in days[idx].get("workouts", []):
+        try:
+            if float(w.get("dist", 0) or 0) > 0:
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def has_any_workout():
+    """True if the current week has at least one real (non-rest) workout."""
+    for i in range(len(dashboard_days())):
+        if _has_wk(i):
+            return True
+    return False
+
+
+def default_wk_idx():
+    """Today's workout if today has one, else the next workout this week."""
+    days = dashboard_days()
+    if not days:
+        return 0
+    ti = today_index()
+    if ti is None:
+        ti = 0
+    if _has_wk(ti):
+        return ti
+    for i in range(ti + 1, len(days)):
+        if _has_wk(i):
+            return i
+    return ti
+
+
+def next_wk_idx(cur):
+    days = dashboard_days()
+    for i in range(cur + 1, len(days)):
+        if _has_wk(i):
+            return i
+    return None
+
+
+def prev_wk_idx(cur):
+    for i in range(cur - 1, -1, -1):
+        if _has_wk(i):
+            return i
+    return None
+
+
+def prev_from_today():
+    """Last workout strictly before today (None if today is Monday / none)."""
+    ti = today_index()
+    if ti is None:
+        ti = 0
+    return prev_wk_idx(ti)
+
+
+def btn(name):
+    """Safe button test that tolerates missing constants across hw/simulator."""
+    try:
+        b = getattr(io, name, None)
+        return (b is not None) and (b in io.pressed)
+    except Exception:
+        return False
+
+
 def draw():
     screen.brush = background
     screen.clear()
 
     units = "mi"
     week = ""
-    people = []
+    names, weeks = dashboard_weeks()
     if dashboard:
         units = dashboard.get("units", DIST_UNITS)
         week = dashboard.get("week_start", "")
-        people = dashboard.get("people", []) or []
+    people = current_people(names, weeks)
 
-    # ---- header ----
+    # ---- header: current date (falls back to "TRAINING" until clock syncs) ----
     screen.font = small_font
     screen.brush = phosphor
-    screen.text("TRAINING", 8, 3)
+    screen.text(_date_header(), 8, 3)
 
     # weather at top-right: "72F Clear"
     if weather:
@@ -538,37 +1030,350 @@ def draw():
         else:
             screen.brush = orange
         screen.text(status, 8, 110)
+        # teach the newest key: C reveals today's/next workout when we have real
+        # plan detail; otherwise hint that upcoming weeks exist via DOWN.
+        hint = "C plan" if has_any_workout() else ("v wks" if max_page() > 0 else "")
+        if hint:
+            sw, _ = screen.measure_text(status)
+            screen.brush = dim
+            screen.text(hint, 8 + sw + 6, 110)
+    # footer-right: local clock if known, else the refresh hint
+    if night.has_time():
+        footer_r = night.hhmm(io.ticks)
+    else:
+        footer_r = "B refresh"
     screen.brush = dim
-    hint = "B refresh"
-    hw, _ = screen.measure_text(hint)
-    screen.text(hint, 152 - hw, 110)
+    hw, _ = screen.measure_text(footer_r)
+    screen.text(footer_r, 152 - hw, 110)
 
 
 # ---------------------------------------------------------------------------
-# Lifecycle
+# Upcoming-weeks page (planned mileage lookahead), shown when page > 0.
+# ---------------------------------------------------------------------------
+COL_R = (116, 152)   # right edges of the two person columns
+
+
+def draw_lookahead(p):
+    screen.brush = background
+    screen.clear()
+
+    names, weeks = dashboard_weeks()
+    units = dashboard.get("units", DIST_UNITS) if dashboard else "mi"
+    ncol = min(len(names), len(COL_R))
+
+    # ---- header ----
+    screen.font = small_font
+    screen.brush = phosphor
+    screen.text("UPCOMING", 8, 3)
+    pos = "%d/%d" % (p + 1, max_page() + 1)
+    screen.brush = dim
+    pw, _ = screen.measure_text(pos)
+    screen.text(pos, 152 - pw, 3)
+    screen.draw(shapes.rectangle(8, 13, 144, 1))
+
+    # ---- column headers (person names) ----
+    screen.font = small_font
+    screen.brush = gray
+    screen.text("Plan " + units, 8, 17)
+    for i in range(ncol):
+        nm = str(names[i])
+        if len(nm) > 7:
+            nm = nm[:7]
+        screen.brush = phosphor
+        w, _ = screen.measure_text(nm)
+        screen.text(nm, COL_R[i] - w, 17)
+
+    # ---- one row per upcoming week ----
+    start_idx = 1 + (p - 1) * LOOKAHEAD_PER_PAGE
+    rows = weeks[start_idx:start_idx + LOOKAHEAD_PER_PAGE]
+    ry = 30
+    if not rows:
+        screen.brush = gray
+        screen.text("No upcoming weeks", 8, ry)
+    for wk in rows:
+        screen.font = small_font
+        screen.brush = gray
+        screen.text(_fmt_md(wk.get("start", "")), 8, ry)
+        planned = wk.get("planned", [])
+        for i in range(ncol):
+            v = planned[i] if i < len(planned) else 0
+            txt = fmt_dist(v)
+            screen.brush = white
+            w, _ = screen.measure_text(txt)
+            screen.text(txt, COL_R[i] - w, ry)
+        ry += 15
+
+    # ---- footer: nav hint + clock ----
+    screen.font = small_font
+    screen.brush = dim
+    screen.text("UP/DN weeks", 8, 110)
+    if night.has_time():
+        footer_r = night.hhmm(io.ticks)
+        hw, _ = screen.measure_text(footer_r)
+        screen.text(footer_r, 152 - hw, 110)
+
+
+# ---------------------------------------------------------------------------
+# Past-weeks page (actual vs planned progress), shown when page < 0 (UP).
+# Weeks are listed newest-first so last week is at the top.
+# ---------------------------------------------------------------------------
+def draw_pastweeks(p):
+    screen.brush = background
+    screen.clear()
+
+    names, _ = dashboard_weeks()
+    past = dashboard_past()
+    units = dashboard.get("units", DIST_UNITS) if dashboard else "mi"
+    ncol = min(len(names), len(COL_R))
+
+    # ---- header ----
+    screen.font = small_font
+    screen.brush = phosphor
+    screen.text("PAST", 8, 3)
+    pp = past_pages()
+    pos = "%d/%d" % (-p, pp) if pp else "0/0"
+    screen.brush = dim
+    pw, _ = screen.measure_text(pos)
+    screen.text(pos, 152 - pw, 3)
+    screen.draw(shapes.rectangle(8, 13, 144, 1))
+
+    # ---- column headers (person names) ----
+    screen.font = small_font
+    screen.brush = gray
+    screen.text("Act/Pl", 8, 17)
+    for i in range(ncol):
+        nm = str(names[i])
+        if len(nm) > 7:
+            nm = nm[:7]
+        screen.brush = phosphor
+        w, _ = screen.measure_text(nm)
+        screen.text(nm, COL_R[i] - w, 17)
+
+    # ---- one row per past week, newest-first ----
+    rev = list(reversed(past))
+    start = (-p - 1) * LOOKAHEAD_PER_PAGE
+    rows = rev[start:start + LOOKAHEAD_PER_PAGE]
+    ry = 30
+    if not rows:
+        screen.brush = gray
+        screen.text("No past weeks", 8, ry)
+    for wk in rows:
+        screen.font = small_font
+        screen.brush = gray
+        screen.text(_fmt_md(wk.get("start", "")), 8, ry)
+        planned = wk.get("planned", [])
+        actual = wk.get("actual", [])
+        for i in range(ncol):
+            pv = planned[i] if i < len(planned) else 0
+            av = actual[i] if i < len(actual) else 0
+            txt = "%s/%s" % (fmt_dist(av), fmt_dist(pv))
+            try:
+                pct = (float(av) / float(pv) * 100.0) if float(pv) > 0 else 0.0
+                screen.brush = pct_brush(pct) if float(pv) > 0 else white
+            except Exception:
+                screen.brush = white
+            w, _ = screen.measure_text(txt)
+            screen.text(txt, COL_R[i] - w, ry)
+        ry += 15
+
+    # ---- footer ----
+    screen.font = small_font
+    screen.brush = dim
+    screen.text("UP/DN weeks", 8, 110)
+    if night.has_time():
+        footer_r = night.hhmm(io.ticks)
+        hw, _ = screen.measure_text(footer_r)
+        screen.text(footer_r, 152 - hw, 110)
+
+
+# ---------------------------------------------------------------------------
+# Single-workout detail page. Stepped through with A (prev) / C (next),
+# seeded at today. Shows both people (Ruby first), planned + title + actual.
+# ---------------------------------------------------------------------------
+def draw_workout(idx):
+    screen.brush = background
+    screen.clear()
+
+    days = dashboard_days()
+    names, _ = dashboard_weeks()
+    units = dashboard.get("units", DIST_UNITS) if dashboard else "mi"
+
+    d = days[idx] if (0 <= idx < len(days)) else None
+
+    # ---- header: day + date, plus a TODAY tag when applicable ----
+    screen.font = small_font
+    screen.brush = phosphor
+    if d:
+        date_iso = d.get("date", "")
+        dow = d.get("dow")
+        if not dow:
+            wd = _weekday_mon0(date_iso)
+            dow = _DOW_APP[wd] if wd is not None else ""
+        hdr = ("%s %s" % (dow, _fmt_md(date_iso))).strip()
+    else:
+        hdr = "WORKOUT"
+    screen.text(hdr, 8, 3)
+    ti = today_index()
+    if ti is not None and ti == idx:
+        screen.brush = green
+        tw, _ = screen.measure_text("TODAY")
+        screen.text("TODAY", 152 - tw, 3)
+    screen.brush = dim
+    screen.draw(shapes.rectangle(8, 13, 144, 1))
+
+    if not d:
+        screen.font = small_font
+        screen.brush = gray
+        screen.text("No plan detail", 8, 44)
+    else:
+        wos = d.get("workouts", [])
+        py = 22
+        for i in range(min(len(names), 2)):
+            nm = str(names[i])
+            wo = wos[i] if i < len(wos) else {}
+            dist = float(wo.get("dist", 0) or 0)
+            title = str(wo.get("title", "") or "")
+            done = wo.get("done", None)
+            # name
+            screen.font = small_font
+            screen.brush = phosphor
+            screen.text(nm, 8, py)
+            # planned distance + title (or "Rest")
+            if dist > 0:
+                line = "%s %s  %s" % (fmt_dist(dist), units, title)
+            else:
+                line = title or "Rest"
+            screen.brush = white
+            screen.text(_fit(line, 144), 8, py + 11)
+            # actual, when the day is today or in the past
+            if done is not None:
+                try:
+                    dtxt = "done %s %s" % (fmt_dist(float(done)), units)
+                except Exception:
+                    dtxt = "done"
+                screen.brush = green
+                screen.text(dtxt, 8, py + 22)
+            py += 44
+
+    # ---- footer ----
+    screen.font = small_font
+    screen.brush = dim
+    screen.text("A< B home C>", 8, 110)
+    if night.has_time():
+        footer_r = night.hhmm(io.ticks)
+        hw, _ = screen.measure_text(footer_r)
+        screen.text(footer_r, 152 - hw, 110)
 # ---------------------------------------------------------------------------
 started = False
 
 
-def update():
-    global started, auto_refresh
+def _update_impl():
+    global started, page, view, wk_idx
     if not started:
         started = True
         load_config()
-        refresh_all()
+        start_refresh()
 
-    # still connecting? keep trying
-    if status == "Connecting WiFi...":
-        refresh_all()
+    # advance the (non-blocking) refresh, one network step per frame
+    if refresh_queue is not None:
+        step_refresh()
 
-    if io.BUTTON_B in io.pressed:
-        refresh_all()
+    # any button press wakes the screen (and counts as activity)
+    try:
+        if io.pressed:
+            night.wake(io.ticks)
+    except Exception:
+        pass
 
-    if (auto_refresh and last_update is not None
-            and io.ticks - last_update > AUTO_REFRESH_MS):
-        refresh_all()
+    # ---- navigation ----
+    #   UP    = past weeks (progress)      DOWN = upcoming weeks (planned)
+    #   A     = previous workout           C    = next workout (seeded at today)
+    #   B     = home (current week); refresh when already home
+    try:
+        if btn("BUTTON_DOWN"):
+            view = "week"
+            page = min(page + 1, max_page())
+        elif btn("BUTTON_UP"):
+            view = "week"
+            page = max(page - 1, min_page())
+        elif btn("BUTTON_C") or btn("BUTTON_RIGHT"):
+            if view == "workout":
+                nxt = next_wk_idx(wk_idx)
+                if nxt is not None:
+                    wk_idx = nxt
+            elif has_any_workout():
+                view = "workout"
+                page = 0
+                wk_idx = default_wk_idx()
+        elif btn("BUTTON_A") or btn("BUTTON_LEFT"):
+            if view == "workout":
+                prv = prev_wk_idx(wk_idx)
+                if prv is not None:
+                    wk_idx = prv
+            else:
+                prv = prev_from_today()
+                if prv is not None and dashboard_days():
+                    view = "workout"
+                    page = 0
+                    wk_idx = prv
+        elif btn("BUTTON_B"):
+            if view == "week" and page == 0:
+                if refresh_queue is None:
+                    start_refresh()          # already home -> manual refresh
+            else:
+                view = "week"                # otherwise jump back to today
+                page = 0
+    except Exception:
+        pass
 
-    draw()
+    # periodic auto refresh. While asleep at night we still refresh, but only
+    # once an hour (NIGHT_REFRESH_MS) instead of every AUTO_REFRESH_MS, to keep
+    # radio/network use low overnight. The refresh steps run at the top of each
+    # frame, so it still completes while the screen stays dark.
+    _interval = NIGHT_REFRESH_MS if night.should_sleep(io.ticks) else AUTO_REFRESH_MS
+    if (auto_refresh and refresh_queue is None and last_update is not None
+            and io.ticks - last_update > _interval):
+        start_refresh()
+
+    # night mode: dark screen between NIGHT_START_H and NIGHT_END_H
+    if night.should_sleep(io.ticks):
+        display_power(False)
+        draw_sleep()
+        return
+
+    # clamp the page in case the data shrank since the last frame; a forced page
+    # (simulator testing) re-applies once the dashboard data has loaded.
+    mp = max_page()
+    mn = min_page()
+    if _forced_page is not None:
+        page = _forced_page
+    if page > mp:
+        page = mp
+    if page < mn:
+        page = mn
+
+    display_power(True)
+    if view == "workout":
+        draw_workout(wk_idx)
+    elif page < 0:
+        draw_pastweeks(page)
+    elif page > 0:
+        draw_lookahead(page)
+    else:
+        draw()
+
+
+def update():
+    # Never let an exception escape to run(): that would end the loop and the
+    # firmware would reset back to the launcher. This keeps runlog up 24/7.
+    try:
+        _update_impl()
+    except Exception as e:
+        try:
+            print("update error:", e)
+        except Exception:
+            pass
+    return None
 
 
 if __name__ == "__main__":

@@ -40,7 +40,7 @@ Open-Meteo ───────────────────────
      Surge login, push this repo, enable **Pages** (Actions source), add the
      repository **secrets**.
   2. Uncomment `DASHBOARD_URL` in the badge's `secrets.py`
-     (`https://jiaren-wu.github.io/<repo>/dashboard.json`).
+     (`https://jiaren-wu.github.io/badger-training-dashboard/dashboard.json`).
 
 ## Publish
 
@@ -48,7 +48,7 @@ This folder is a self-contained git repo (the vendored `home/` clone is ignored)
 To publish:
 
 ```bash
-git remote add origin git@github.com:jiaren-wu/<repo>.git
+git remote add origin git@github.com:jiaren-wu/badger-training-dashboard.git
 git push -u origin main
 ```
 

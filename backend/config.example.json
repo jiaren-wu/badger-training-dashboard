@@ -2,18 +2,23 @@
   "units": "mi",
   "timezone": "America/Los_Angeles",
   "output": "public/dashboard.json",
+  "lookahead_weeks": 8,
   "people": [
     {
       "name": "Ruby",
-      "source": "finalsurge",
-      "weekly_goal": 35,
+      "garmin_tokens_env": "GARMIN_TOKENS_BASE64_RUBY",
+      "garmin_email_env": "GARMIN_EMAIL_RUBY",
+      "garmin_password_env": "GARMIN_PASSWORD_RUBY",
       "finalsurge_email_env": "FINALSURGE_EMAIL_RUBY",
       "finalsurge_password_env": "FINALSURGE_PASSWORD_RUBY"
     },
     {
       "name": "Jiaren",
-      "source": "garmin",
-      "weekly_goal": 42
+      "garmin_tokens_env": "GARMIN_TOKENS_BASE64_JIAREN",
+      "garmin_email_env": "GARMIN_EMAIL_JIAREN",
+      "garmin_password_env": "GARMIN_PASSWORD_JIAREN",
+      "finalsurge_email_env": "FINALSURGE_EMAIL_JIAREN",
+      "finalsurge_password_env": "FINALSURGE_PASSWORD_JIAREN"
     }
   ]
 }

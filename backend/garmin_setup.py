@@ -18,7 +18,17 @@ Re-run this if the token ever expires or is revoked.
 import getpass
 import sys
 
-from garminconnect import Garmin
+try:
+    from garminconnect import Garmin
+except ModuleNotFoundError:
+    sys.exit(
+        "\ngarminconnect isn't installed for THIS python.\n"
+        "Use the project virtualenv instead:\n\n"
+        "  ~/.badger-venv/bin/python garmin_setup.py\n\n"
+        "(one-time setup, if that venv doesn't exist yet:)\n"
+        "  python3 -m venv ~/.badger-venv\n"
+        "  ~/.badger-venv/bin/python -m pip install -r requirements.txt\n"
+    )
 
 
 def main():
@@ -37,9 +47,12 @@ def main():
         sys.exit(1)
 
     token_b64 = g.client.dumps()  # base64 blob understood by Garmin.login(tokenstore=...)
-    print("\nSUCCESS. Store this as the secret GARMIN_TOKENS_BASE64:\n")
+    who = input("\nWhose token is this? (e.g. RUBY or JIAREN, blank to skip): ").strip().upper()
+    secret_name = "GARMIN_TOKENS_BASE64_%s" % who if who else "GARMIN_TOKENS_BASE64"
+    print("\nSUCCESS. Store this as the secret %s:\n" % secret_name)
     print(token_b64)
     print("\n(length: %d chars)" % len(token_b64))
+    print("Run this script again logged in as the OTHER person for their token.")
 
 
 if __name__ == "__main__":
