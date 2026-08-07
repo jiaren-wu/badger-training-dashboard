@@ -735,6 +735,62 @@ def pct_brush(p):
     return red
 
 
+# ---------------------------------------------------------------------------
+# Shared-plan detection.  Ruby and Jiaren normally follow the *same* Final Surge
+# plan at the same level, so their planned mileage is identical every day/week.
+# When that's true the multi-person screens collapse the duplicated planned
+# column into a single shared one ("both").  If a per-weekday level override is
+# ever re-enabled (so the two plans diverge) these return None/False and the
+# screens fall back to the original per-person columns automatically.
+def _shared_value(vals):
+    """Common value if every present entry is equal, else None."""
+    seen = None
+    have = False
+    for v in vals:
+        if v is None:
+            continue
+        try:
+            f = round(float(v), 3)
+        except Exception:
+            return None
+        if not have:
+            seen = f
+            have = True
+        elif f != seen:
+            return None
+    return seen if have else None
+
+
+def _weeks_share_plan(rows, ncol):
+    """True when every row carries an identical planned value across all people."""
+    if ncol < 2 or not rows:
+        return False
+    for wk in rows:
+        pl = wk.get("planned", [])
+        if len(pl) < ncol or _shared_value(pl[:ncol]) is None:
+            return False
+    return True
+
+
+def _shared_workout(wos, ncol):
+    """(dist, title) shared across all people for a day, else None."""
+    key = None
+    have = False
+    for i in range(ncol):
+        wo = wos[i] if i < len(wos) else {}
+        try:
+            d = round(float(wo.get("dist", 0) or 0), 3)
+        except Exception:
+            d = 0.0
+        t = str(wo.get("title", "") or "")
+        if not have:
+            key = (d, t)
+            have = True
+        elif key != (d, t):
+            return None
+    return key if have else None
+
+
 def battery_level():
     """Battery charge as 0-100 int, or None when the firmware doesn't expose it."""
     if _get_battery_level is None:
@@ -1257,6 +1313,9 @@ def draw():
 # Upcoming-weeks page (planned mileage lookahead), shown when page > 0.
 # ---------------------------------------------------------------------------
 COL_R = (100, 152)   # right edges of the two person columns
+# Shared-plan Past layout: plan shown once (gray) + each runner's actual.
+PAST_ACT_R = (112, 152)   # right edges of the two actual columns
+PAST_PLAN_R = 74          # right edge of the single shared plan column
 
 
 def draw_lookahead(p):
@@ -1277,21 +1336,30 @@ def draw_lookahead(p):
     screen.text(pos, 152 - pw, 3)
     screen.draw(shapes.rectangle(8, 13, 144, 1))
 
-    # ---- column headers (person names) ----
-    screen.font = small_font
-    screen.brush = gray
-    screen.text("Plan " + units, 8, 17)
-    for i in range(ncol):
-        nm = str(names[i])
-        if len(nm) > 7:
-            nm = nm[:7]
-        screen.brush = phosphor
-        w, _ = screen.measure_text(nm)
-        screen.text(nm, COL_R[i] - w, 17)
-
     # ---- one row per upcoming week ----
     start_idx = 1 + (p - 1) * LOOKAHEAD_PER_PAGE
     rows = weeks[start_idx:start_idx + LOOKAHEAD_PER_PAGE]
+    shared = _weeks_share_plan(rows, ncol)
+
+    # ---- column headers ----
+    screen.font = small_font
+    screen.brush = gray
+    screen.text("Week", 8, 17)
+    if shared:
+        # One shared plan column: Ruby and Jiaren are on the same plan.
+        lbl = "Plan both"
+        screen.brush = dim
+        w, _ = screen.measure_text(lbl)
+        screen.text(lbl, 152 - w, 17)
+    else:
+        for i in range(ncol):
+            nm = str(names[i])
+            if len(nm) > 7:
+                nm = nm[:7]
+            screen.brush = phosphor
+            w, _ = screen.measure_text(nm)
+            screen.text(nm, COL_R[i] - w, 17)
+
     ry = 30
     if not rows:
         screen.brush = gray
@@ -1301,12 +1369,18 @@ def draw_lookahead(p):
         screen.brush = gray
         screen.text(_fmt_md(wk.get("start", "")), 8, ry)
         planned = wk.get("planned", [])
-        for i in range(ncol):
-            v = planned[i] if i < len(planned) else 0
-            txt = fmt_mi(v)
+        if shared:
+            txt = "%s %s" % (fmt_mi(_shared_value(planned[:ncol])), units)
             screen.brush = white
             w, _ = screen.measure_text(txt)
-            screen.text(txt, COL_R[i] - w, ry)
+            screen.text(txt, 152 - w, ry)
+        else:
+            for i in range(ncol):
+                v = planned[i] if i < len(planned) else 0
+                txt = fmt_mi(v)
+                screen.brush = white
+                w, _ = screen.measure_text(txt)
+                screen.text(txt, COL_R[i] - w, ry)
         ry += 15
 
     # ---- footer: nav hint + battery/clock ----
@@ -1316,6 +1390,7 @@ def draw_lookahead(p):
     hint = "UP/DN wks"
     if 8 + screen.measure_text(hint)[0] <= rx - 6:
         screen.text(hint, 8, 110)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1342,22 +1417,37 @@ def draw_pastweeks(p):
     screen.text(pos, 152 - pw, 3)
     screen.draw(shapes.rectangle(8, 13, 144, 1))
 
-    # ---- column headers (person names) ----
-    screen.font = small_font
-    screen.brush = gray
-    screen.text("Act/Pl", 8, 17)
-    for i in range(ncol):
-        nm = str(names[i])
-        if len(nm) > 7:
-            nm = nm[:7]
-        screen.brush = phosphor
-        w, _ = screen.measure_text(nm)
-        screen.text(nm, COL_R[i] - w, 17)
-
     # ---- one row per past week, newest-first ----
     rev = list(reversed(past))
     start = (-p - 1) * LOOKAHEAD_PER_PAGE
     rows = rev[start:start + LOOKAHEAD_PER_PAGE]
+    shared = _weeks_share_plan(rows, ncol)
+
+    # ---- column headers ----
+    screen.font = small_font
+    screen.brush = gray
+    if shared:
+        screen.text("Week", 8, 17)
+        screen.brush = dim
+        w, _ = screen.measure_text("Pl")
+        screen.text("Pl", PAST_PLAN_R - w, 17)
+        for i in range(ncol):
+            nm = str(names[i])
+            if len(nm) > 6:
+                nm = nm[:6]
+            screen.brush = phosphor
+            w, _ = screen.measure_text(nm)
+            screen.text(nm, PAST_ACT_R[i] - w, 17)
+    else:
+        screen.text("Act/Pl", 8, 17)
+        for i in range(ncol):
+            nm = str(names[i])
+            if len(nm) > 7:
+                nm = nm[:7]
+            screen.brush = phosphor
+            w, _ = screen.measure_text(nm)
+            screen.text(nm, COL_R[i] - w, 17)
+
     ry = 30
     if not rows:
         screen.brush = gray
@@ -1368,17 +1458,36 @@ def draw_pastweeks(p):
         screen.text(_fmt_md(wk.get("start", "")), 8, ry)
         planned = wk.get("planned", [])
         actual = wk.get("actual", [])
-        for i in range(ncol):
-            pv = planned[i] if i < len(planned) else 0
-            av = actual[i] if i < len(actual) else 0
-            txt = "%s/%s" % (fmt_mi(av), fmt_mi(pv))
-            try:
-                pct = (float(av) / float(pv) * 100.0) if float(pv) > 0 else 0.0
-                screen.brush = pct_brush(pct) if float(pv) > 0 else white
-            except Exception:
-                screen.brush = white
-            w, _ = screen.measure_text(txt)
-            screen.text(txt, COL_R[i] - w, ry)
+        if shared:
+            pv = _shared_value(planned[:ncol]) or 0
+            # shared plan (gray), shown once
+            screen.brush = gray
+            pt = fmt_mi(pv)
+            w, _ = screen.measure_text(pt)
+            screen.text(pt, PAST_PLAN_R - w, ry)
+            # each runner's actual, colored by their % of the shared plan
+            for i in range(ncol):
+                av = actual[i] if i < len(actual) else 0
+                try:
+                    pct = (float(av) / float(pv) * 100.0) if float(pv) > 0 else 0.0
+                    screen.brush = pct_brush(pct) if float(pv) > 0 else white
+                except Exception:
+                    screen.brush = white
+                at = fmt_mi(av)
+                w, _ = screen.measure_text(at)
+                screen.text(at, PAST_ACT_R[i] - w, ry)
+        else:
+            for i in range(ncol):
+                pv = planned[i] if i < len(planned) else 0
+                av = actual[i] if i < len(actual) else 0
+                txt = "%s/%s" % (fmt_mi(av), fmt_mi(pv))
+                try:
+                    pct = (float(av) / float(pv) * 100.0) if float(pv) > 0 else 0.0
+                    screen.brush = pct_brush(pct) if float(pv) > 0 else white
+                except Exception:
+                    screen.brush = white
+                w, _ = screen.measure_text(txt)
+                screen.text(txt, COL_R[i] - w, ry)
         ry += 15
 
     # ---- footer ----
@@ -1392,7 +1501,8 @@ def draw_pastweeks(p):
 
 # ---------------------------------------------------------------------------
 # Single-workout detail page. Stepped through with A (prev) / C (next),
-# seeded at today. Shows both people (Ruby first), planned + title + actual.
+# seeded at today. When both runners share the workout it's shown once with
+# each runner's completion; if their plans differ it falls back to per-person.
 # ---------------------------------------------------------------------------
 def draw_workout(idx):
     screen.brush = background
@@ -1431,33 +1541,72 @@ def draw_workout(idx):
         screen.text("No plan detail", 8, 44)
     else:
         wos = d.get("workouts", [])
-        py = 22
-        for i in range(min(len(names), 2)):
-            nm = str(names[i])
-            wo = wos[i] if i < len(wos) else {}
-            dist = float(wo.get("dist", 0) or 0)
-            title = str(wo.get("title", "") or "")
-            done = wo.get("done", None)
-            # name
+        nn = min(len(names), 2)
+        shared = _shared_workout(wos, nn) if wos else None
+        if shared is not None:
+            # Ruby and Jiaren share this workout: show it ONCE, then each
+            # runner's completion underneath (no duplicated plan line).
+            dist, title = shared
             screen.font = small_font
-            screen.brush = phosphor
-            screen.text(nm, 8, py)
-            # planned distance + title (or "Rest")
             if dist > 0:
-                line = "%s %s  %s" % (fmt_dist(dist), units, title)
+                screen.brush = phosphor
+                screen.text("%s %s" % (fmt_dist(dist), units), 8, 22)
+                if title:
+                    screen.brush = white
+                    screen.text(_fit(title, 144), 8, 34)
             else:
-                line = title or "Rest"
-            screen.brush = white
-            screen.text(_fit(line, 144), 8, py + 11)
-            # actual, when the day is today or in the past
-            if done is not None:
-                try:
-                    dtxt = "done %s %s" % (fmt_dist(float(done)), units)
-                except Exception:
-                    dtxt = "done"
-                screen.brush = green
-                screen.text(dtxt, 8, py + 22)
-            py += 44
+                # Rest / cross-train / info day: the title is the whole story.
+                screen.brush = phosphor
+                screen.text(_fit(title or "Rest", 144), 8, 22)
+            screen.brush = dim
+            screen.draw(shapes.rectangle(8, 48, 144, 1))
+            # completion, one line per runner
+            yy = 54
+            for i in range(nn):
+                wo = wos[i] if i < len(wos) else {}
+                done = wo.get("done", None)
+                screen.font = small_font
+                screen.brush = phosphor
+                screen.text(str(names[i]), 8, yy)
+                if done is not None:
+                    try:
+                        dt = "done %s %s" % (fmt_dist(float(done)), units)
+                    except Exception:
+                        dt = "done"
+                    screen.brush = green
+                else:
+                    dt = "--"
+                    screen.brush = gray
+                w, _ = screen.measure_text(dt)
+                screen.text(dt, 152 - w, yy)
+                yy += 14
+        else:
+            # Plans differ (per-weekday level override): keep the original
+            # per-person blocks so each runner's distinct plan is visible.
+            py = 22
+            for i in range(nn):
+                nm = str(names[i])
+                wo = wos[i] if i < len(wos) else {}
+                dist = float(wo.get("dist", 0) or 0)
+                title = str(wo.get("title", "") or "")
+                done = wo.get("done", None)
+                screen.font = small_font
+                screen.brush = phosphor
+                screen.text(nm, 8, py)
+                if dist > 0:
+                    line = "%s %s  %s" % (fmt_dist(dist), units, title)
+                else:
+                    line = title or "Rest"
+                screen.brush = white
+                screen.text(_fit(line, 144), 8, py + 11)
+                if done is not None:
+                    try:
+                        dtxt = "done %s %s" % (fmt_dist(float(done)), units)
+                    except Exception:
+                        dtxt = "done"
+                    screen.brush = green
+                    screen.text(dtxt, 8, py + 22)
+                py += 44
 
     # ---- footer ----
     screen.font = small_font
