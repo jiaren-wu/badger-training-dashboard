@@ -370,6 +370,57 @@ def _resolve_level(w, level, overrides):
     return level
 
 
+def _effective_planned_meters(workouts, level=DEFAULT_FS_LEVEL, overrides=None):
+    """Per-date planned meters for counted runs, with weekly back-fill.
+
+    Runs whose text or structured data give an explicit distance keep it.
+    Some sessions (e.g. a "Group Workout" of drills/intervals) count as a
+    planned run but state no mileage, so they parse to 0. When a week's coach
+    summary note ("Level N: ~X miles") totals more than the sum of that week's
+    explicit runs, the shortfall is spread evenly over the week's mileage-less
+    runs. This surfaces every planned session on the badge and makes the weekly
+    total match the plan's stated volume. Returns {iso_date: meters}.
+    """
+    per_date = {}        # iso -> meters (explicit; 0 for mileage-less runs)
+    zero_runs = {}       # week_monday_iso -> [iso, ...] counted runs with 0 miles
+    explicit_wk = {}     # week_monday_iso -> summed explicit run meters
+    summary_wk = {}      # week_monday_iso -> coach summary target meters
+    for w in workouts:
+        d = _workout_date(w)
+        if not d:
+            continue
+        iso = d.isoformat()
+        wk = (d - dt.timedelta(days=d.weekday())).isoformat()
+        lvl = _resolve_level(w, level, overrides)
+        if _counts_as_planned_run(w):
+            m = _planned_meters(w, lvl)
+            per_date[iso] = per_date.get(iso, 0.0) + m
+            if m > 0:
+                explicit_wk[wk] = explicit_wk.get(wk, 0.0) + m
+            else:
+                zero_runs.setdefault(wk, []).append(iso)
+        else:
+            # A non-run note may be the plan's weekly-summary total entry.
+            txt = w.get("description") or w.get("Description") or ""
+            mi = _parse_level_miles(txt, lvl)
+            if mi is None:
+                mi = _parse_level_miles(_workout_title(w), lvl)
+            if mi is not None:
+                summary_wk[wk] = max(summary_wk.get(wk, 0.0),
+                                     mi * METERS_PER_MILE)
+    for wk, isos in zero_runs.items():
+        target = summary_wk.get(wk)
+        if not target:
+            continue
+        remainder = target - explicit_wk.get(wk, 0.0)
+        if remainder <= 0:
+            continue
+        share = remainder / len(isos)
+        for iso in isos:
+            per_date[iso] = per_date.get(iso, 0.0) + share
+    return per_date
+
+
 def finalsurge_planned_by_week(email, password, mondays, units,
                                level=DEFAULT_FS_LEVEL):
     """Return {monday_iso: planned_units} across the full lookahead range."""
@@ -384,22 +435,19 @@ def _planned_by_week(workouts, units, level=DEFAULT_FS_LEVEL, overrides=None):
     """Weekly planned mileage {monday_iso: units}.
 
     The weekly total is the sum of the week's run-type workouts (each run's
-    per-level mileage parsed from its description). Coaching tips, cross-
-    training (given in minutes) and the plan's own weekly-summary total entry
-    are skipped so they never inflate or double-count the total. Weeks with no
-    parseable running mileage are omitted (planned = 0). A per-weekday level
-    override (e.g. Wednesday on level 2) is honored per workout.
+    per-level mileage parsed from its description). Coaching tips and cross-
+    training (given in minutes) are skipped. A run that counts as planned but
+    states no mileage (e.g. a group workout of drills) is back-filled from the
+    week's coach summary total so the weekly volume matches the plan's stated
+    intent. Weeks with no parseable running mileage are omitted (planned = 0).
+    A per-weekday level override (e.g. Wednesday on level 2) is honored.
     """
+    per_date = _effective_planned_meters(workouts, level, overrides)
     buckets = {}
-    for w in workouts:
-        if not _counts_as_planned_run(w):
-            continue
-        d = _workout_date(w)
-        if not d:
-            continue
-        m = _planned_meters(w, _resolve_level(w, level, overrides))
+    for iso, m in per_date.items():
         if m <= 0:
             continue
+        d = dt.date.fromisoformat(iso)
         key = (d - dt.timedelta(days=d.weekday())).isoformat()
         buckets[key] = buckets.get(key, 0.0) + m
     return {k: to_units(v, units) for k, v in buckets.items()}
@@ -452,17 +500,21 @@ def _counts_as_planned_run(w):
 
 def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL,
                     overrides=None):
-    """Per-day planned detail keyed by ISO date: {iso: {'dist':units,'title':str}}.
+    """Per-day planned detail keyed by ISO date: {iso: {'dist','title','plan'}}.
 
     When `monday` is a week's Monday, only that Mon..Sun window is returned; pass
     `monday=None` to bucket every workout in `workouts` (the whole fetched range),
     which is what the multi-week plan calendar uses. A per-weekday level override
-    (e.g. Wednesday on level 2) is applied per workout.
+    (e.g. Wednesday on level 2) is applied per workout. ``plan`` marks days that
+    hold a genuine planned session (so the badge can navigate to a group workout
+    even when its distance is unspecified); ``dist`` is back-filled from the
+    week's coach summary for counted runs that state no mileage.
     """
     lo = hi = None
     if monday is not None:
         lo = monday.date()
         hi = lo + dt.timedelta(days=6)
+    per_date = _effective_planned_meters(workouts, level, overrides)
     out = {}
     for w in workouts:
         d = _workout_date(w)
@@ -471,10 +523,9 @@ def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL,
         if lo is not None and (d < lo or d > hi):
             continue
         iso = d.isoformat()
-        e = out.get(iso) or {"dist": 0.0, "title": ""}
+        e = out.get(iso) or {"dist": 0.0, "title": "", "plan": False}
         if _counts_as_planned_run(w):
-            e["dist"] += to_units(
-                _planned_meters(w, _resolve_level(w, level, overrides)), units)
+            e["plan"] = True
         title = _workout_title(w)
         is_run = _is_run_workout(w)
         # Prefer a real run's title over coaching tips / cross-training notes.
@@ -482,7 +533,8 @@ def finalsurge_days(workouts, monday, units, level=DEFAULT_FS_LEVEL,
             e["title"] = title
             e["_run"] = is_run
         out[iso] = e
-    for e in out.values():
+    for iso, e in out.items():
+        e["dist"] = to_units(per_date.get(iso, 0.0), units)
         e.pop("_run", None)
     return out
 
@@ -614,6 +666,7 @@ def build_payload(cfg, units, tzname):
                     "dist": dist,
                     "title": fd.get("title", "") or "",
                     "done": round(float(done), 1) if done is not None else None,
+                    "plan": bool(fd.get("plan")),
                 })
             days.append({"date": iso, "dow": _DOW[d.weekday()],
                          "workouts": workouts})
