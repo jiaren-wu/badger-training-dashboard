@@ -2,7 +2,8 @@
   "units": "mi",
   "timezone": "America/Los_Angeles",
   "output": "public/dashboard.json",
-  "lookahead_weeks": 8,
+  "lookahead_weeks": 5,
+  "past_weeks": 2,
   "people": [
     {
       "name": "Ruby",
