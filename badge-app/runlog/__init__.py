@@ -78,6 +78,7 @@ cyan = brushes.color(56, 232, 225)
 WIFI_SSID = None
 WIFI_PASSWORD = None
 DASHBOARD_URL = None          # optional: URL returning dashboard.json
+DASH_CACHE_PATH = "/system/apps/runlog/dash_cache.json"  # last-known data (offline)
 WEATHER_LOCATION = None       # optional: same formats as the weather app
 DIST_UNITS = "mi"             # "mi" or "km"
 WIFI_TIMEOUT = 60             # seconds to wait for association before giving up
@@ -664,11 +665,38 @@ def rain_soon(w):
 # ---------------------------------------------------------------------------
 # Running dashboard
 # ---------------------------------------------------------------------------
+def _save_dashboard_cache(data):
+    """Persist the last good dashboard to flash so a later offline boot can
+    still show real numbers instead of demo data."""
+    try:
+        with open(DASH_CACHE_PATH, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print("cache save error:", e)
+
+
+def _load_dashboard_cache():
+    """Load the last good dashboard from flash (called once at startup, before
+    the first network refresh) so the badge renders real last-known mileage
+    immediately even when WiFi is failing."""
+    global dashboard
+    if dashboard is not None:
+        return
+    try:
+        with open(DASH_CACHE_PATH) as f:
+            dashboard = json.load(f)
+        print("loaded cached dashboard")
+    except Exception:
+        pass  # no cache yet -- falls back to demo data as before
+
+
 def fetch_dashboard():
     global dashboard
     if not DASHBOARD_URL:
         return False
-    dashboard = http_json(DASHBOARD_URL)
+    data = http_json(DASHBOARD_URL)
+    dashboard = data
+    _save_dashboard_cache(data)   # remember it for offline boots
     return True
 
 
@@ -1872,6 +1900,7 @@ def _update_impl():
     if not started:
         started = True
         load_config()
+        _load_dashboard_cache()   # show last-known real data instantly (offline-safe)
         start_refresh()
 
     # advance the (non-blocking) refresh, one network step per frame
