@@ -37,6 +37,13 @@ except Exception:
     except Exception:
         urlopen = None
 
+# machine.reset() lets us reboot the badge for a clean heap overnight. Only
+# present on real hardware (absent under the desktop simulator / CPython).
+try:
+    import machine
+except Exception:
+    machine = None
+
 import json
 import gc
 
@@ -74,12 +81,26 @@ DASHBOARD_URL = None          # optional: URL returning dashboard.json
 WEATHER_LOCATION = None       # optional: same formats as the weather app
 DIST_UNITS = "mi"             # "mi" or "km"
 WIFI_TIMEOUT = 60             # seconds to wait for association before giving up
+# Power saving: when True, the WiFi radio is powered down between refreshes and
+# only brought up for each fetch. Refreshes are 15 min apart (awake) / 60 min
+# (asleep), so the radio spends ~99% of its time off -> a big battery saving vs
+# staying associated 24/7. The refresh state machine already retries/self-heals
+# each cycle, so the only cost is a few seconds to re-associate per refresh.
+# Set WIFI_POWER_SAVE = False in /secrets.py if you ever see WiFi flakiness.
+WIFI_POWER_SAVE = True
 
 # Night mode: display goes dark between these hours (local time); any button
 # wakes it for WAKE_SECONDS. Overridable from /secrets.py.
 NIGHT_START_H = 23            # 11 PM
 NIGHT_END_H = 6               # 6 AM
 WAKE_SECONDS = 20
+# Long-run memory hygiene: MicroPython's heap fragments over days of uptime,
+# which can eventually fail a TLS handshake ("Offline - retry"). Once per night,
+# while the screen is already dark, reboot after a long uptime to start from a
+# clean heap. system-main.py auto-launches runlog on boot, so this returns
+# straight to the dashboard with no interaction. Off via NIGHT_REBOOT = False.
+NIGHT_REBOOT = True
+NIGHT_REBOOT_MIN_UPTIME_MS = 12 * 60 * 60 * 1000   # only after >12h uptime
 
 # Location
 LATITUDE = None
@@ -180,8 +201,12 @@ DEMO_DASHBOARD = {
             {"dist": 0.0, "title": "Rest", "done": None},
             {"dist": 0.0, "title": "Rest", "done": None}]},
         {"date": "2025-07-30", "dow": "Wed", "workouts": [
-            {"dist": 5.0, "title": "Group Workout", "done": 5.0},
-            {"dist": 5.0, "title": "Group Workout", "done": 4.7}]},
+            {"dist": 5.0, "title": "Group Workout", "done": 5.0,
+             "wtype": "Intervals", "l1": "Minutes 4-3-2-1, 4 x 100m strides",
+             "l2": "Minutes 5-4-3-2-1, 4 x 100m strides"},
+            {"dist": 5.0, "title": "Group Workout", "done": 4.7,
+             "wtype": "Intervals", "l1": "Minutes 4-3-2-1, 4 x 100m strides",
+             "l2": "Minutes 5-4-3-2-1, 4 x 100m strides"}]},
         {"date": "2025-07-31", "dow": "Thu", "workouts": [
             {"dist": 4.0, "title": "Solo Run #2", "done": 4.0},
             {"dist": 4.0, "title": "Solo Run #2", "done": 4.0}]},
@@ -201,8 +226,10 @@ DEMO_DASHBOARD = {
             {"dist": 0.0, "title": "Rest", "done": None},
             {"dist": 0.0, "title": "Rest", "done": None}]},
         {"date": "2025-08-06", "dow": "Wed", "workouts": [
-            {"dist": 5.0, "title": "Group Workout", "done": 5.0},
-            {"dist": 5.0, "title": "Group Workout", "done": 3.0}]},
+            {"dist": 5.0, "title": "Group Workout", "done": 5.0,
+             "wtype": "Hills", "l1": "4 x 1K Loops", "l2": "5 x 1K Loops"},
+            {"dist": 5.0, "title": "Group Workout", "done": 3.0,
+             "wtype": "Hills", "l1": "4 x 1K Loops", "l2": "5 x 1K Loops"}]},
         {"date": "2025-08-07", "dow": "Thu", "workouts": [
             {"dist": 4.0, "title": "Solo Run #2", "done": None},
             {"dist": 4.0, "title": "Solo Run #2", "done": None}]},
@@ -222,8 +249,12 @@ DEMO_DASHBOARD = {
             {"dist": 0.0, "title": "Rest", "done": None},
             {"dist": 0.0, "title": "Rest", "done": None}]},
         {"date": "2025-08-13", "dow": "Wed", "workouts": [
-            {"dist": 5.0, "title": "Group Workout", "done": None},
-            {"dist": 5.0, "title": "Group Workout", "done": None}]},
+            {"dist": 5.0, "title": "Group Workout", "done": None,
+             "wtype": "Tempo", "l1": "4 x 1 mile @ threshold, 4 x 100m strides",
+             "l2": "5 x 1 mile @ threshold, 4 x 100m strides"},
+            {"dist": 5.0, "title": "Group Workout", "done": None,
+             "wtype": "Tempo", "l1": "4 x 1 mile @ threshold, 4 x 100m strides",
+             "l2": "5 x 1 mile @ threshold, 4 x 100m strides"}]},
         {"date": "2025-08-14", "dow": "Thu", "workouts": [
             {"dist": 4.0, "title": "Solo Run #2", "done": None},
             {"dist": 4.0, "title": "Solo Run #2", "done": None}]},
@@ -254,6 +285,7 @@ def load_config():
     global WIFI_SSID, WIFI_PASSWORD, DASHBOARD_URL, WEATHER_LOCATION
     global DIST_UNITS, config_loaded, _forced_hhmm, _forced_page
     global NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS, night
+    global WIFI_POWER_SAVE, NIGHT_REBOOT
     global _forced_date, _forced_view, _forced_wk, today_iso, view, wk_idx
     if config_loaded:
         return
@@ -294,6 +326,16 @@ def load_config():
         try:
             from secrets import WAKE_SECONDS as WS
             WAKE_SECONDS = int(WS)
+        except Exception:
+            pass
+        try:
+            from secrets import WIFI_POWER_SAVE as WPS
+            WIFI_POWER_SAVE = bool(WPS)
+        except Exception:
+            pass
+        try:
+            from secrets import NIGHT_REBOOT as NR
+            NIGHT_REBOOT = bool(NR)
         except Exception:
             pass
         night = NightMode(NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS * 1000)
@@ -386,6 +428,29 @@ def wlan_start():
         ticks_start = None      # re-arm for a clean retry on the next cycle
         return False
     return None  # still trying
+
+
+def wlan_stop():
+    """Power the WiFi radio down between refreshes (energy saving).
+
+    Called at the end of a refresh when WIFI_POWER_SAVE is on. wlan_start()
+    brings the radio back up (active(True) + connect) at the next refresh, so
+    the association is torn down and rebuilt each cycle instead of being held
+    open 24/7. No-op / harmless under the simulator (network is None).
+    """
+    global connected, ticks_start
+    connected = False
+    ticks_start = None
+    if wlan is None:
+        return
+    try:
+        wlan.disconnect()
+    except Exception:
+        pass
+    try:
+        wlan.active(False)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -655,6 +720,8 @@ def step_refresh():
             status = "Offline - retry"
         last_update = io.ticks
         loading = False
+        if WIFI_POWER_SAVE:
+            wlan_stop()          # radio off until the next refresh (energy save)
         gc.collect()
 
     refresh_queue.pop(0)
@@ -798,6 +865,22 @@ def _shared_workout(wos, ncol):
         elif key != (d, t):
             return None
     return key if have else None
+
+
+def _detail_of(wos, ncol):
+    """(wtype, l1, l2) when a day is a quality group workout, else None.
+
+    Group (Wednesday) workouts carry per-level prescriptions (l1/l2) from the
+    backend; both runners share them, so the first one that has them wins.
+    """
+    for i in range(min(ncol, len(wos))):
+        wo = wos[i] or {}
+        l1 = wo.get("l1")
+        l2 = wo.get("l2")
+        if l1 or l2:
+            return (str(wo.get("wtype", "") or ""),
+                    str(l1 or ""), str(l2 or ""))
+    return None
 
 
 def battery_level():
@@ -1060,6 +1143,49 @@ def _fit(txt, maxw):
         return txt
 
 
+def _wrap(txt, maxw, maxlines):
+    """Word-wrap txt into <=maxlines lines, each fitting maxw px.
+
+    The final line is ellipsized when text is dropped so nothing looks complete
+    when it isn't. Uses measure_text with a coarse fallback for safety.
+    """
+    words = str(txt or "").split()
+    if not words:
+        return []
+
+    def _fits(t):
+        try:
+            return screen.measure_text(t)[0] <= maxw
+        except Exception:
+            return len(t) * 6 <= maxw
+
+    lines = []
+    cur = ""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        cand = w if not cur else (cur + " " + w)
+        if _fits(cand):
+            cur = cand
+            i += 1
+        elif cur:
+            lines.append(cur)
+            cur = ""
+            if len(lines) >= maxlines:
+                break
+        else:                              # single word wider than the line
+            lines.append(_fit(w, maxw))
+            i += 1
+            if len(lines) >= maxlines:
+                break
+    if cur and len(lines) < maxlines:
+        lines.append(cur)
+        i = len(words)
+    if i < len(words) and lines:           # text left over -> mark truncation
+        lines[-1] = _fit(lines[-1] + " ..", maxw)
+    return lines
+
+
 def dashboard_days():
     if dashboard:
         d = dashboard.get("days")
@@ -1104,7 +1230,13 @@ def min_page():
 
 
 def _has_wk(idx):
-    """True if day idx has a real workout (someone's planned distance > 0)."""
+    """True if day idx holds a real planned session.
+
+    A workout counts when someone's planned distance is > 0, or (for a genuine
+    planned session with no stated distance, e.g. a titled group workout) the
+    backend marked it ``plan`` AND it carries a title to show. Falls back to
+    distance-only on older data that lacks the flag.
+    """
     days = dashboard_days()
     if idx < 0 or idx >= len(days):
         return False
@@ -1114,6 +1246,8 @@ def _has_wk(idx):
                 return True
         except Exception:
             pass
+        if w.get("plan") and (w.get("title") or "").strip():
+            return True
     return False
 
 
@@ -1512,7 +1646,60 @@ def draw_pastweeks(p):
 # Single-workout detail page. Stepped through with A (prev) / C (next),
 # seeded at today. When both runners share the workout it's shown once with
 # each runner's completion; if their plans differ it falls back to per-person.
+# Wednesday "group workouts" are quality efforts described by reps rather than
+# miles, so they get a dedicated Level 1 / Level 2 layout.
 # ---------------------------------------------------------------------------
+def _draw_level(label, spec, color, y):
+    """Render an 'L1'/'L2' label plus its wrapped spec; return the next y."""
+    screen.font = small_font
+    screen.brush = color
+    screen.text(label, 8, y)
+    lines = _wrap(spec, 124, 2)          # spec column runs x=28..152
+    if not lines:
+        return y + 11
+    screen.brush = white
+    for ln in lines:
+        screen.text(ln, 28, y)
+        y += 10
+    return y + 3
+
+
+def _draw_group_detail(detail, shared, wos, names, nn, units):
+    """Group workout: show the type + Level 1 / Level 2 plan (shared by both
+    runners), then each runner's completion. No planned distance is shown."""
+    wtype, l1, l2 = detail
+    ttl = wtype or (shared[1] if shared else "") or "Group workout"
+    screen.font = small_font
+    screen.brush = phosphor
+    screen.text(_fit(ttl, 144), 8, 18)
+    y = 31
+    if l1:
+        y = _draw_level("L1", l1, cyan, y)
+    if l2:
+        y = _draw_level("L2", l2, orange, y)
+    screen.brush = dim
+    screen.draw(shapes.rectangle(8, y, 144, 1))
+    y += 6
+    for i in range(nn):
+        wo = wos[i] if i < len(wos) else {}
+        done = wo.get("done", None)
+        screen.font = small_font
+        screen.brush = phosphor
+        screen.text(str(names[i]), 8, y)
+        if done is not None:
+            try:
+                dtx = "done %s %s" % (fmt_dist(float(done)), units)
+            except Exception:
+                dtx = "done"
+            screen.brush = green
+        else:
+            dtx = "--"
+            screen.brush = gray
+        w, _ = screen.measure_text(dtx)
+        screen.text(dtx, 152 - w, y)
+        y += 12
+
+
 def draw_workout(idx):
     screen.brush = background
     screen.clear()
@@ -1551,8 +1738,11 @@ def draw_workout(idx):
     else:
         wos = d.get("workouts", [])
         nn = min(len(names), 2)
+        detail = _detail_of(wos, nn) if wos else None
         shared = _shared_workout(wos, nn) if wos else None
-        if shared is not None:
+        if detail is not None:
+            _draw_group_detail(detail, shared, wos, names, nn, units)
+        elif shared is not None:
             # Ruby and Jiaren share this workout: show it ONCE, then each
             # runner's completion underneath (no duplicated plan line).
             dist, title = shared
@@ -1627,6 +1817,26 @@ def draw_workout(idx):
         screen.text(legend, 8, 110)
 # ---------------------------------------------------------------------------
 started = False
+
+
+def _maybe_night_reboot():
+    # Once per night, after a long uptime and only while the screen is already
+    # dark and idle, reboot to defragment MicroPython's heap. system-main.py
+    # auto-launches runlog on boot, so the badge wakes straight back into the
+    # dashboard (a brief lit screen while it re-syncs the clock, then dark).
+    # Only reached from inside the should_sleep branch, so the clock is known
+    # and WiFi has been working -- never fires during the unsynced post-boot
+    # window. After a reset io.ticks restarts near 0, so at most one per night.
+    if not NIGHT_REBOOT or machine is None:
+        return
+    if refresh_queue is not None or loading:
+        return
+    if io.ticks < NIGHT_REBOOT_MIN_UPTIME_MS:
+        return
+    try:
+        machine.reset()
+    except Exception:
+        pass
 
 
 def _update_impl():
@@ -1709,6 +1919,7 @@ def _update_impl():
     if night.should_sleep(io.ticks):
         display_power(False)
         draw_sleep()
+        _maybe_night_reboot()
         return
 
     # clamp the page in case the data shrank since the last frame; a forced page
