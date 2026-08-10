@@ -47,6 +47,14 @@ except Exception:
 import json
 import gc
 
+# `time.sleep_ms` lets us yield the CPU between frames so the core idles (WFI)
+# instead of redrawing a static screen at full tilt -- the main awake battery
+# saving. Present on the badge (MicroPython) and CPython; guarded either way.
+try:
+    import time as _time
+except Exception:
+    _time = None
+
 from nightmode import NightMode
 
 # ---------------------------------------------------------------------------
@@ -153,6 +161,21 @@ AUTO_REFRESH_MS = 15 * 60 * 1000   # 15 minutes (awake)
 NIGHT_REFRESH_MS = 60 * 60 * 1000  # 1 hour (slower cadence while asleep)
 RETRY_REFRESH_MS = 60 * 1000       # 60s: retry quickly while not live (self-heal)
 
+# --- Temporary battery / FPS instrumentation -------------------------------
+# Logs battery% and the *measured* frame rate over USB serial (line prefix
+# "BATT ") every couple of minutes so we can compute real drain (%/hour) and
+# confirm the pacing win with numbers instead of estimates. It also tries to
+# append the same rows to a CSV on flash, but this badge mounts its filesystem
+# read-only at runtime (EROFS), so on this device serial is the working path
+# and the file write self-disables after the first failure. Flip BATTERY_DEBUG
+# = False (and redeploy) to remove it once we have data. FRAME_PACE lets us
+# capture a no-pacing baseline for a true A/B on the same hardware: run a few
+# hours with it False, a few with it True, then compare.
+BATTERY_DEBUG = False
+FRAME_PACE = True
+BATTERY_LOG_PATH = "/system/apps/runlog/battery_log.csv"
+BATTERY_LOG_MS = 2 * 60 * 1000     # append one row every 2 minutes
+
 # Night mode controller (local clock from network time + io.ticks).
 night = NightMode(NIGHT_START_H, NIGHT_END_H, WAKE_SECONDS * 1000)
 _display_on = True
@@ -185,6 +208,11 @@ _forced_date = None           # simulator/testing override, e.g. "2026-08-05"
 _forced_view = None           # simulator/testing override: "week" | "workout" | "chart"
 _forced_wk = None             # simulator/testing override: workout day index
 _forced_style = None          # simulator/testing override: chart style index
+_last_input_ts = 0            # io.ticks of the last button press (frame pacing)
+_dbg_frames = 0               # frames counted since the last battery-log row
+_dbg_last_ts = None           # io.ticks captured at the last battery-log row
+_dbg_header_done = False      # write the CSV header once per boot
+_dbg_file_ok = True           # this badge is EROFS at runtime; self-disable file writes on first failure
 
 # ---------------------------------------------------------------------------
 # Demo data so the dashboard renders even with no WiFi / no backend yet.
@@ -949,6 +977,99 @@ def display_power(on):
             _display_on = False
 
 
+def _idle_sleep(ms):
+    """Yield the CPU for ~ms so the core idles (WFI) between frames instead of
+    spinning a full redraw of a screen that only changes every 15 min. This is
+    the main awake battery saving. Best-effort: any failure just skips the nap
+    for this frame, so behaviour is unchanged where the primitive is missing."""
+    if _time is None:
+        return
+    try:
+        sm = getattr(_time, "sleep_ms", None)
+        if sm is not None:
+            sm(int(ms))
+        else:
+            _time.sleep(ms / 1000.0)
+    except Exception:
+        pass
+
+
+def _frame_pace(is_night):
+    """Adaptive per-frame idle: nap when nothing is happening, run full speed
+    when it matters. We still draw every frame, so the screen is always correct
+    -- this only trims wasted CPU cycles, so it's safe under any firmware.
+
+    Never paces during a network refresh (keeps TLS fetches snappy and
+    reliable), while loading, within 1s of a button press, or in the scrolling
+    workout view (keeps navigation and the spec scroll smooth). Naps longer at
+    night, when the screen is dark and static, for a bigger overnight saving."""
+    if not FRAME_PACE:
+        return   # A/B baseline: run the loop full-speed to measure "before"
+    try:
+        if refresh_queue is not None or loading:
+            return
+        if io.ticks - _last_input_ts < 1000:
+            return
+        if not is_night and view == "workout":
+            return
+        _idle_sleep(400 if is_night else 50)
+    except Exception:
+        pass
+
+
+def _battery_log():
+    """Append a battery% + measured-FPS row to flash (and echo it to serial) at
+    most every BATTERY_LOG_MS. Runs once per frame: it counts the frame and
+    flushes a row when the interval elapses, so the FPS column reflects the real
+    achieved frame rate (naps included). Entirely best-effort and gated on
+    BATTERY_DEBUG, so it can never disturb the dashboard or ship on by accident."""
+    global _dbg_frames, _dbg_last_ts, _dbg_header_done, _dbg_file_ok
+    if not BATTERY_DEBUG:
+        return
+    try:
+        now = io.ticks
+        _dbg_frames += 1
+        if _dbg_last_ts is None:
+            _dbg_last_ts = now
+            return
+        elapsed = now - _dbg_last_ts
+        if elapsed < BATTERY_LOG_MS:
+            return
+        fps = (_dbg_frames * 1000.0) / elapsed if elapsed > 0 else 0.0
+        batt = battery_level()
+        mins = night.current_min(now)
+        # min,ticks_ms,batt,chg,frames,fps,night,view
+        row = "%d,%d,%s,%d,%d,%.1f,%d,%s" % (
+            (mins if mins is not None else -1),
+            now,
+            ("" if batt is None else str(batt)),
+            (1 if battery_charging() else 0),
+            _dbg_frames,
+            fps,
+            (1 if night.should_sleep(now) else 0),
+            view,
+        )
+        if _dbg_file_ok:
+            try:
+                with open(BATTERY_LOG_PATH, "a") as f:
+                    if not _dbg_header_done:
+                        f.write("min,ticks_ms,batt,chg,frames,fps,night,view\n")
+                        _dbg_header_done = True
+                    f.write(row + "\n")
+            except Exception as e:
+                # This badge mounts its filesystem read-only at runtime (EROFS,
+                # errno 30) -- the same reason the dashboard cache can't persist
+                # while running. File logging is impossible here, so drop to
+                # serial-only and stop retrying to avoid spamming the console.
+                _dbg_file_ok = False
+                print("batt log: FS read-only, serial-only from here (", e, ")")
+        print("BATT", row)          # USB-serial capture (works while plugged in)
+        _dbg_frames = 0
+        _dbg_last_ts = now
+    except Exception:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Drawing
 # ---------------------------------------------------------------------------
@@ -1136,6 +1257,18 @@ def draw_footer_right(y, fallback=None):
         screen.brush = BATT_DOT.get(st, gray)
         screen.draw(shapes.circle(cx, cy, r))
         lx = cx - r
+    if BATTERY_DEBUG:
+        # Temporary: exact numeric % just left of the dot so an unplugged drain
+        # test can be read/photographed (no serial or file logging off-USB).
+        _lvl = battery_level()
+        if _lvl is not None:
+            screen.font = small_font
+            screen.brush = dim
+            _s = "%d%%" % _lvl
+            _sw, _ = screen.measure_text(_s)
+            _g = 4 if lx < right else 0
+            screen.text(_s, lx - _g - _sw, y)
+            lx = lx - _g - _sw
     return lx
 
 
@@ -2520,7 +2653,7 @@ def _maybe_night_reboot():
 
 
 def _update_impl():
-    global started, page, view, wk_idx, chart_style
+    global started, page, view, wk_idx, chart_style, _last_input_ts
     if not started:
         started = True
         load_config()
@@ -2531,10 +2664,13 @@ def _update_impl():
     if refresh_queue is not None:
         step_refresh()
 
+    _battery_log()   # temporary: count this frame, flush battery%/FPS when due
+
     # any button press wakes the screen (and counts as activity)
     try:
         if io.pressed:
             night.wake(io.ticks)
+            _last_input_ts = io.ticks
     except Exception:
         pass
 
@@ -2604,6 +2740,17 @@ def _update_impl():
     _interval = NIGHT_REFRESH_MS if night.should_sleep(io.ticks) else AUTO_REFRESH_MS
     if not running_live and not night.should_sleep(io.ticks):
         _interval = RETRY_REFRESH_MS   # not live yet -> retry quickly to self-heal
+    elif running_live and not night.should_sleep(io.ticks):
+        # On battery, fetch less often -- the radio power-up + TLS handshake is
+        # the pricey part -- but keep the snappy 15 min cadence while charging.
+        # Only kicks in when the firmware actually reports battery, so devices
+        # without battery telemetry behave exactly as before.
+        _blvl = battery_level()
+        if _blvl is not None and _blvl < 100 and not battery_charging():
+            # <100% and not charging == genuinely on battery. A full battery on
+            # USB also reports charging=False, so the <100 guard keeps the snappy
+            # 15 min cadence while docked and full.
+            _interval = AUTO_REFRESH_MS * (3 if _blvl < 20 else 2)
     if (auto_refresh and refresh_queue is None and last_update is not None
             and io.ticks - last_update > _interval):
         start_refresh()
@@ -2613,6 +2760,7 @@ def _update_impl():
         display_power(False)
         draw_sleep()
         _maybe_night_reboot()
+        _frame_pace(True)
         return
 
     # clamp the page in case the data shrank since the last frame; a forced page
@@ -2637,6 +2785,8 @@ def _update_impl():
         draw_lookahead(page)
     else:
         draw()
+
+    _frame_pace(False)
 
 
 def update():
