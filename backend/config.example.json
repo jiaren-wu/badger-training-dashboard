@@ -3,9 +3,16 @@
   "timezone": "America/Los_Angeles",
   "output": "public/dashboard.json",
   "lookahead_weeks": 8,
+  "plan_sheet": {
+    "id": "1kLi7D6fM4LzT4_95W6ZKr3AYPD423vDkb_ntvUUFUsQ",
+    "gids": { "half": 1172380107, "full": 766571768 },
+    "target": "mid",
+    "year": 2026
+  },
   "people": [
     {
       "name": "RB",
+      "plan": "full",
       "garmin_tokens_env": "GARMIN_TOKENS_BASE64_RB",
       "garmin_email_env": "GARMIN_EMAIL_RB",
       "garmin_password_env": "GARMIN_PASSWORD_RB",
@@ -14,6 +21,7 @@
     },
     {
       "name": "OSK",
+      "plan": "full",
       "garmin_tokens_env": "GARMIN_TOKENS_BASE64_OSK",
       "garmin_email_env": "GARMIN_EMAIL_OSK",
       "garmin_password_env": "GARMIN_PASSWORD_OSK",
