@@ -7,6 +7,7 @@
   "people": [
     {
       "name": "Ruby",
+      "plan": "full",
       "garmin_tokens_env": "GARMIN_TOKENS_BASE64_RUBY",
       "garmin_email_env": "GARMIN_EMAIL_RUBY",
       "garmin_password_env": "GARMIN_PASSWORD_RUBY",
@@ -16,6 +17,7 @@
     },
     {
       "name": "Jiaren",
+      "plan": "full",
       "garmin_tokens_env": "GARMIN_TOKENS_BASE64_JIAREN",
       "garmin_email_env": "GARMIN_EMAIL_JIAREN",
       "garmin_password_env": "GARMIN_PASSWORD_JIAREN",

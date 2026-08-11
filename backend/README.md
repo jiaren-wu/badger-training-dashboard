@@ -19,8 +19,10 @@ Garmin (actual) + Final Surge (planned) ──> build_dashboard.py ──> dashb
 - **ACTUAL** mileage comes from each person's own **Garmin Connect** account
   (this week only; future weeks have no actual yet).
 - **PLANNED** mileage comes from each person's own **Final Surge** training plan,
-  per week. If a person has no Final Surge account — or a given week has no
-  planned distance — that week falls back to **26.2 miles** (a marathon).
+  per week. Any week Final Surge doesn't cover — no account, or a week not yet in
+  the plan — is filled from the public **Google Sheet** training plan when the
+  person has a `plan` (`"full"`/`"half"`) configured. Weeks neither source covers
+  are `0`.
 
 The published file looks like:
 
@@ -69,8 +71,10 @@ environment variables that do):
 | `people[].garmin_tokens_env` | env var holding that person's Garmin token blob (preferred). |
 | `people[].garmin_email_env` / `garmin_password_env` | optional Garmin login fallback. |
 | `people[].finalsurge_email_env` / `finalsurge_password_env` | optional Final Surge login for PLANNED mileage. |
+| `people[].plan` | optional `"full"`/`"half"` — fills weeks Final Surge doesn't cover from the Google Sheet plan. |
 
-Every person uses **Garmin for actual** and **Final Surge for planned** — there
+Every person uses **Garmin for actual** and **Final Surge for planned** (with the
+**Google Sheet** plan filling any uncovered weeks) — there
 is no per-person `source` field anymore.
 
 ---
@@ -109,7 +113,17 @@ and isn't reliable in CI.
 Just the account email + password in `.env`
 (`FINALSURGE_EMAIL_RUBY` / `FINALSURGE_PASSWORD_RUBY`, and the `_JIAREN` pair).
 The script logs in to `beta.finalsurge.com` and reads each week's planned
-distance. **If you skip this for a person, every week falls back to 26.2 miles.**
+distance. **If you skip this for a person, weeks are filled from the Google Sheet
+plan below (or `0` if they have no `plan`).**
+
+### Google Sheet — PLANNED fallback (no login needed)
+
+Give a person a `plan` of `"full"` or `"half"` in `config.json` and any week
+Final Surge doesn't cover is read from the public Fleet Feet Fall 2026 Google
+Sheet (exported as CSV, no auth). The weekly cell is a range (e.g. `~ 19-23`);
+`plan_sheet.target` picks `"low"`, `"high"`, or `"mid"` (default). Override the
+sheet id, tab gids, `target`, or `year` via a top-level `plan_sheet` block —
+see `config.example.json`. Sensible defaults are baked in, so `plan` alone works.
 
 ---
 
@@ -198,7 +212,8 @@ weather/air-quality and a "Demo" footer.
 - **Garmin** uses the unofficial `garminconnect` login (the official Activity API
   is partner-gated). Mint a token per person with `garmin_setup.py` so CI never
   needs a password or an MFA code.
-- **Final Surge** is optional per person; missing plan ⇒ 26.2-mile fallback.
+- **Final Surge** is optional per person; any week it doesn't cover is filled
+  from the **Google Sheet** plan (if the person has a `plan`), else `0`.
 - Distances are converted to your `units`. Garmin is always meters; Final Surge
   is assumed meters unless a unit field is present.
 - Only the **current** week has actual mileage; upcoming weeks are planned-only.

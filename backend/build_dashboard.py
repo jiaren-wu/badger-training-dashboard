@@ -43,6 +43,7 @@ Usage:
     python build_dashboard.py --debug-finalsurge "Ruby"   # dump one raw workout
 """
 import argparse
+import csv
 import datetime as dt
 import json
 import os
@@ -202,6 +203,96 @@ def garmin_day_meters(g, monday, sunday, run_only=True):
             continue
         out[d] = out.get(d, 0.0) + float(a.get("distance", 0) or 0)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Google Sheet training plan  (PLANNED weekly mileage, per current week)
+#
+# The Fleet Feet Fall 2026 plan is a public Google Sheet with one row per week
+# (columns: Week, Dates "M/D-M/D", ..., Weekly Mileage "~ low-high"). We read
+# the tab as CSV (no auth) and pick the row whose week contains "today".
+#
+# The weekly cell is a range; `target` chooses "low", "high", or "mid".
+# ---------------------------------------------------------------------------
+DEFAULT_PLAN_SHEET = {
+    "id": "1kLi7D6fM4LzT4_95W6ZKr3AYPD423vDkb_ntvUUFUsQ",
+    "gids": {"half": 1172380107, "full": 766571768},
+    "target": "mid",   # low | high | mid
+    "year": 2026,      # year the plan's M/D dates fall in
+    "weekly_col": 10,  # 0-based index of the "Weekly Mileage" column
+}
+
+_plan_cache = {}  # gid -> list of {"start": date, "end": date, "low", "high"}
+
+
+def _plan_sheet_cfg(config):
+    cfg = dict(DEFAULT_PLAN_SHEET)
+    override = (config or {}).get("plan_sheet") or {}
+    cfg.update({k: v for k, v in override.items() if k != "gids"})
+    gids = dict(DEFAULT_PLAN_SHEET["gids"])
+    gids.update(override.get("gids") or {})
+    cfg["gids"] = gids
+    return cfg
+
+
+def _parse_weekly_range(cell):
+    """'~ 19-23' -> (19.0, 23.0); '~ 34' -> (34.0, 34.0); '' -> None."""
+    if not cell:
+        return None
+    nums = re.findall(r"\d+(?:\.\d+)?", cell)
+    if not nums:
+        return None
+    lo = float(nums[0])
+    hi = float(nums[1]) if len(nums) > 1 else lo
+    return lo, hi
+
+
+def _fetch_plan_weeks(sheet_id, gid, year, weekly_col):
+    if gid in _plan_cache:
+        return _plan_cache[gid]
+    url = ("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=%s"
+           % (sheet_id, gid))
+    r = requests.get(url, timeout=30)
+    r.raise_for_status()
+    weeks = []
+    for row in csv.reader(r.text.splitlines()):
+        if len(row) <= weekly_col or not row[0].strip().isdigit():
+            continue
+        dates = row[1].strip()          # "8/10-8/16"
+        rng = _parse_weekly_range(row[weekly_col])
+        m = re.match(r"\s*(\d{1,2})/(\d{1,2})", dates)
+        if not m or rng is None:
+            continue
+        start = dt.date(year, int(m.group(1)), int(m.group(2)))
+        weeks.append({"start": start, "end": start + dt.timedelta(days=6),
+                      "low": rng[0], "high": rng[1]})
+    _plan_cache[gid] = weeks
+    return weeks
+
+
+def plan_week_miles(config, plan, monday, target=None):
+    """Planned miles for the week containing `monday`, or None if out of plan."""
+    cfg = _plan_sheet_cfg(config)
+    gid = cfg["gids"].get(plan)
+    if gid is None:
+        raise RuntimeError("Unknown plan '%s' (expected one of %s)"
+                           % (plan, ", ".join(cfg["gids"])))
+    weeks = _fetch_plan_weeks(cfg["id"], gid, int(cfg["year"]),
+                              int(cfg["weekly_col"]))
+    today = monday.date()
+    match = next((w for w in weeks if w["start"] <= today <= w["end"]), None)
+    if match is None:
+        return None
+    pick = (target or cfg.get("target") or "mid").lower()
+    if pick == "low":
+        return match["low"]
+    if pick == "high":
+        return match["high"]
+    return (match["low"] + match["high"]) / 2.0
+
+
+def miles_to_units(miles, units):
+    return miles if units == "mi" else miles * (METERS_PER_MILE / METERS_PER_KM)
 
 
 # ---------------------------------------------------------------------------
@@ -660,6 +751,26 @@ def build_payload(cfg, units, tzname):
             except Exception as e:
                 print("WARN: Final Surge for %s failed: %s" % (name, e),
                       file=sys.stderr)
+
+        # Fill any week with no Final Surge planned distance from the public
+        # Google Sheet training plan (e.g. "full"/"half"), when the person has a
+        # `plan` configured. Final Surge (per-day, personalised) still wins where
+        # present; the sheet supplies the official weekly target elsewhere --
+        # notably future weeks Final Surge hasn't populated yet.
+        plan_name = p.get("plan")
+        if plan_name:
+            for mon in all_mondays:
+                iso = mon.date().isoformat()
+                if planned.get(iso):
+                    continue
+                try:
+                    miles = plan_week_miles(cfg, plan_name, mon)
+                except Exception as e:
+                    print("WARN: plan sheet for %s failed: %s" % (name, e),
+                          file=sys.stderr)
+                    break
+                if miles is not None:
+                    planned[iso] = miles_to_units(miles, units)
         planned_maps.append(planned)
         fs_day_maps.append(fs_days)
 
