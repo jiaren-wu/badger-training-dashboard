@@ -45,6 +45,7 @@ Usage:
 import argparse
 import csv
 import datetime as dt
+import io
 import json
 import os
 import re
@@ -229,7 +230,14 @@ PLAN_DAY_COLS = (3, 4, 5, 6, 7, 8, 9)
 # reps-based quality session ("Tier 1: 4 x 1K Loops") is NOT read as 4 miles.
 _SHEET_TIER_MILES = re.compile(r"tier\s*([12])\s*:\s*(\d+(?:\.\d+)?)\s*mile", re.I)
 
-_plan_cache = {}  # gid -> list of {"start","end","low","high","day_tiers"}
+# A tier-less long run: the cell *starts* with a plain distance ("11 miles",
+# "14 miles | Optional Workout: ..."). Anchoring at the start is deliberate so
+# that a rep prescription buried mid-cell ("Tier 1: 4 x 1 miles @ threshold")
+# is NOT mistaken for the day's distance, and non-mileage days ("30 min cross
+# training", "5K benchmark", "Mobility B", "Rest") don't match at all.
+_SHEET_LONGRUN_MILES = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*miles?\b", re.I)
+
+_plan_cache = {}  # gid -> [{"start","end","low","high","day_tiers","day_single"}]
 
 
 def _plan_sheet_cfg(config):
@@ -271,6 +279,20 @@ def _parse_day_tiers(cell):
     return tiers or None
 
 
+def _parse_day_single_miles(cell):
+    """Miles for a tier-less long-run day ("11 miles"), else None.
+
+    Only cells that *start* with a plain distance qualify, so tiered days,
+    reps-based quality sessions, cross-training, mobility, and rest all yield
+    None -- Final Surge's own number stands for everything except the sheet's
+    single-distance long runs.
+    """
+    if not cell:
+        return None
+    m = _SHEET_LONGRUN_MILES.match(cell)
+    return float(m.group(1)) if m else None
+
+
 def _fetch_plan_weeks(sheet_id, gid, year, weekly_col):
     if gid in _plan_cache:
         return _plan_cache[gid]
@@ -279,7 +301,11 @@ def _fetch_plan_weeks(sheet_id, gid, year, weekly_col):
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     weeks = []
-    for row in csv.reader(r.text.splitlines()):
+    # Parse via a file-like object (not splitlines) so newlines embedded in
+    # quoted cells -- e.g. a long-run cell "14 miles\nOptional Workout: ..." --
+    # are preserved. Splitting on newlines first would glue "miles" onto the
+    # next word ("milesOptional") and corrupt distance parsing.
+    for row in csv.reader(io.StringIO(r.text)):
         if len(row) <= weekly_col or not row[0].strip().isdigit():
             continue
         dates = row[1].strip()          # "8/10-8/16"
@@ -290,8 +316,11 @@ def _fetch_plan_weeks(sheet_id, gid, year, weekly_col):
         start = dt.date(year, int(m.group(1)), int(m.group(2)))
         day_tiers = [_parse_day_tiers(row[c]) if c < len(row) else None
                      for c in PLAN_DAY_COLS]
+        day_single = [_parse_day_single_miles(row[c]) if c < len(row) else None
+                      for c in PLAN_DAY_COLS]
         weeks.append({"start": start, "end": start + dt.timedelta(days=6),
-                      "low": rng[0], "high": rng[1], "day_tiers": day_tiers})
+                      "low": rng[0], "high": rng[1],
+                      "day_tiers": day_tiers, "day_single": day_single})
     _plan_cache[gid] = weeks
     return weeks
 
@@ -320,10 +349,12 @@ def plan_week_miles(config, plan, monday, target=None):
 def plan_day_miles(config, plan, day, tier):
     """Planned miles for a specific date and tier from the sheet, else None.
 
-    ``day`` is a date; ``tier`` is 1 or 2. Returns the runner's tier mileage
-    for days the sheet gives as "Tier 1: X miles / Tier 2: Y miles" (falling
-    back to the other tier if only one is present), or None for days with no
-    explicit per-tier distance.
+    ``day`` is a date; ``tier`` is 1 or 2. For days the sheet gives as
+    "Tier 1: X miles / Tier 2: Y miles" returns the runner's tier mileage
+    (falling back to the other tier if only one is present). For tier-less
+    long-run days ("11 miles") returns that single distance regardless of
+    tier. Returns None for days with no explicit sheet distance (reps
+    sessions, cross-training, mobility, rest).
     """
     cfg = _plan_sheet_cfg(config)
     gid = cfg["gids"].get(plan)
@@ -334,12 +365,13 @@ def plan_day_miles(config, plan, day, tier):
     match = next((w for w in weeks if w["start"] <= day <= w["end"]), None)
     if match is None:
         return None
-    tiers = match["day_tiers"][day.weekday()]
-    if not tiers:
-        return None
-    if tier in tiers:
-        return tiers[tier]
-    return tiers.get(1, tiers.get(2))
+    wd = day.weekday()
+    tiers = match["day_tiers"][wd]
+    if tiers:
+        if tier in tiers:
+            return tiers[tier]
+        return tiers.get(1, tiers.get(2))
+    return match["day_single"][wd]
 
 
 def miles_to_units(miles, units):
