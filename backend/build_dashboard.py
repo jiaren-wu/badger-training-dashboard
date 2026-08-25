@@ -222,7 +222,14 @@ DEFAULT_PLAN_SHEET = {
     "weekly_col": 10,  # 0-based index of the "Weekly Mileage" column
 }
 
-_plan_cache = {}  # gid -> list of {"start": date, "end": date, "low", "high"}
+# 0-based indices of the Monday..Sunday columns in the plan sheet.
+PLAN_DAY_COLS = (3, 4, 5, 6, 7, 8, 9)
+
+# "Tier 1: 4 miles" -> (1, 4.0). The trailing "mile" unit is required so a
+# reps-based quality session ("Tier 1: 4 x 1K Loops") is NOT read as 4 miles.
+_SHEET_TIER_MILES = re.compile(r"tier\s*([12])\s*:\s*(\d+(?:\.\d+)?)\s*mile", re.I)
+
+_plan_cache = {}  # gid -> list of {"start","end","low","high","day_tiers"}
 
 
 def _plan_sheet_cfg(config):
@@ -247,6 +254,23 @@ def _parse_weekly_range(cell):
     return lo, hi
 
 
+def _parse_day_tiers(cell):
+    """{1: mi, 2: mi} for a day cell listing 'Tier N: X miles', else None.
+
+    Only plain per-tier distances are returned. Reps-based quality sessions
+    ("Tier 1: 4 x 1K Loops"), rest, cross-training, and tier-less single
+    distances (a "11 miles" long run) yield None, so Final Surge's own number
+    stands for those days -- the tier override only touches days where the plan
+    gives two different per-tier mileages.
+    """
+    if not cell:
+        return None
+    tiers = {}
+    for m in _SHEET_TIER_MILES.finditer(cell):
+        tiers[int(m.group(1))] = float(m.group(2))
+    return tiers or None
+
+
 def _fetch_plan_weeks(sheet_id, gid, year, weekly_col):
     if gid in _plan_cache:
         return _plan_cache[gid]
@@ -264,8 +288,10 @@ def _fetch_plan_weeks(sheet_id, gid, year, weekly_col):
         if not m or rng is None:
             continue
         start = dt.date(year, int(m.group(1)), int(m.group(2)))
+        day_tiers = [_parse_day_tiers(row[c]) if c < len(row) else None
+                     for c in PLAN_DAY_COLS]
         weeks.append({"start": start, "end": start + dt.timedelta(days=6),
-                      "low": rng[0], "high": rng[1]})
+                      "low": rng[0], "high": rng[1], "day_tiers": day_tiers})
     _plan_cache[gid] = weeks
     return weeks
 
@@ -289,6 +315,31 @@ def plan_week_miles(config, plan, monday, target=None):
     if pick == "high":
         return match["high"]
     return (match["low"] + match["high"]) / 2.0
+
+
+def plan_day_miles(config, plan, day, tier):
+    """Planned miles for a specific date and tier from the sheet, else None.
+
+    ``day`` is a date; ``tier`` is 1 or 2. Returns the runner's tier mileage
+    for days the sheet gives as "Tier 1: X miles / Tier 2: Y miles" (falling
+    back to the other tier if only one is present), or None for days with no
+    explicit per-tier distance.
+    """
+    cfg = _plan_sheet_cfg(config)
+    gid = cfg["gids"].get(plan)
+    if gid is None:
+        return None
+    weeks = _fetch_plan_weeks(cfg["id"], gid, int(cfg["year"]),
+                              int(cfg["weekly_col"]))
+    match = next((w for w in weeks if w["start"] <= day <= w["end"]), None)
+    if match is None:
+        return None
+    tiers = match["day_tiers"][day.weekday()]
+    if not tiers:
+        return None
+    if tier in tiers:
+        return tiers[tier]
+    return tiers.get(1, tiers.get(2))
 
 
 def miles_to_units(miles, units):
@@ -801,6 +852,28 @@ def build_payload(cfg, units, tzname):
         cur_actual_total.append(total)
         past_actual_maps.append(past_actual)
 
+    # Per-day planned distance from the Google Sheet's per-tier cells. Where a
+    # day gives an explicit "Tier 1: X / Tier 2: Y", the runner's tier is the
+    # authoritative planned distance (Final Surge's structured number can carry
+    # the other tier). One best-effort sheet read per person (fetch is cached).
+    sheet_day_maps = []
+    for p in people:
+        smap = {}
+        plan_name = p.get("plan")
+        if plan_name:
+            tier = int(p.get("finalsurge_level") or DEFAULT_FS_LEVEL)
+            try:
+                for mon in all_mondays:
+                    for k in range(7):
+                        dd = (mon + dt.timedelta(days=k)).date()
+                        mi = plan_day_miles(cfg, plan_name, dd, tier)
+                        if mi is not None:
+                            smap[dd.isoformat()] = miles_to_units(mi, units)
+            except Exception as e:
+                print("WARN: plan-day sheet for %s failed: %s"
+                      % (p.get("name", "?"), e), file=sys.stderr)
+        sheet_day_maps.append(smap)
+
     def planned_row(iso):
         row = []
         for pi in range(len(people)):
@@ -840,6 +913,14 @@ def build_payload(cfg, units, tzname):
                 dist = round(float(fd.get("dist", 0.0) or 0.0), 1)
                 done = day_actual_maps[pi].get(iso)
                 title = fd.get("title", "") or ""
+                # The Google Sheet is the authoritative plan: when a day gives
+                # an explicit per-tier distance ("Tier 1: 4 miles / Tier 2: 6
+                # miles"), show the runner's assigned tier rather than Final
+                # Surge's structured distance, which can carry the other tier.
+                sheet_dist = sheet_day_maps[pi].get(iso)
+                sheet_planned = sheet_dist is not None
+                if sheet_planned:
+                    dist = round(float(sheet_dist), 1)
                 # Emit only non-default fields. The badge reads every workout
                 # key with a .get() default, so omitting zeros/blanks/nulls is
                 # invisible to it but roughly halves the (91-day) payload -- and
@@ -853,7 +934,7 @@ def build_payload(cfg, units, tzname):
                     wo["title"] = title
                 if done is not None:
                     wo["done"] = round(float(done), 1)
-                if fd.get("plan"):
+                if fd.get("plan") or sheet_planned:
                     wo["plan"] = True
                 # Quality group workout: carry the per-level prescription so the
                 # badge can show Level 1 / Level 2 detail instead of a distance.
