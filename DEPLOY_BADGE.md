@@ -76,7 +76,8 @@ WIFI_PASSWORD = "your-wifi-password"
 DIST_UNITS = "mi"
 
 # --- Weather location (optional) ---
-# If omitted, the badge auto-detects your city from your internet connection.
+# If omitted, the badge uses a coarse Seattle city-centre point.
+# Keep it coarse (2 decimals is about 1 km): this file stays on the badge.
 # To force a location, use ONE of these forms:
 # WEATHER_LOCATION = {"lat": 47.61, "lon": -122.33, "name": "Seattle"}
 # WEATHER_LOCATION = (47.61, -122.33, "Seattle")

@@ -609,23 +609,15 @@ def resolve_location():
                 return
         except Exception as e:
             print("WEATHER_LOCATION parse error:", e)
-    # IP detect
-    try:
-        r = http_json("https://ipapi.co/json/")
-        LATITUDE = r["latitude"]
-        LONGITUDE = r["longitude"]
-        LOCATION_NAME = r["city"]
-        COUNTRY_CODE = r.get("country_code", "US")
-        use_fahrenheit = (COUNTRY_CODE == "US")
-        location_detected = True
-    except Exception as e:
-        print("IP geolocation error:", e)
-        # Default to a coarse Seattle city-centre point rather than failing.
-        LATITUDE, LONGITUDE = 47.61, -122.33
-        LOCATION_NAME = "Seattle"
-        COUNTRY_CODE = "US"
-        use_fahrenheit = True
-        location_detected = True
+    # No IP geolocation (it sends the home IP to a third party) and no
+    # precise default. Set WEATHER_LOCATION in the badge's secrets.py for
+    # your area (2 decimals, about 1 km, is plenty for weather); otherwise
+    # fall back to a coarse Seattle city-centre point.
+    LATITUDE, LONGITUDE = 47.61, -122.33
+    LOCATION_NAME = "Seattle"
+    COUNTRY_CODE = "US"
+    use_fahrenheit = True
+    location_detected = True
 
 
 # ---------------------------------------------------------------------------
@@ -1658,7 +1650,7 @@ def draw():
         screen.text(tmp, 8, 3)
         tw, _ = screen.measure_text(tmp)
         cx = 8 + tw + 6
-        # City (geolocated, e.g. "Seattle"/"Seattle") right-aligned, tinted by
+        # City (from WEATHER_LOCATION, e.g. "Seattle") right-aligned, tinted by
         # the current weather so it reads as info rather than a greyed-out label.
         city_x = 152
         if location_detected:

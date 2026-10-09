@@ -1142,8 +1142,10 @@ def write_output(path, payload):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, separators=(",", ":"))
-    print("Wrote %s" % path)
-    print(json.dumps(payload, indent=2))
+    # Summary only: Actions logs on a public repo are readable by anyone.
+    print("Wrote %s (%d weeks, %d days, %d people)" % (
+        path, len(payload.get("weeks", [])), len(payload.get("days", [])),
+        len(payload.get("names", []))))
 
 
 if __name__ == "__main__":
